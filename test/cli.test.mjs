@@ -62,8 +62,19 @@ function fakeApi(behaviour) {
 
         // The real request model is CLOSED: an unknown key is a 422, not a field the
         // server quietly ignores. Mirror that, or a client that invents a field passes
-        // every test here and 422s on every call against production.
-        const allowed = ["prompt", "respond", "conversation_id", "input_asset_id", "aspect_ratio"];
+        // every test here and 422s on every call in production.
+        //
+        // `operation` is on this list because it ships in the gateway build this package
+        // targets. It is NOT on production yet, which is why publishing waits on that
+        // deploy. Removing it here would hide a real regression later.
+        const allowed = [
+          "prompt",
+          "respond",
+          "conversation_id",
+          "input_asset_id",
+          "aspect_ratio",
+          "operation",
+        ];
         const extra = Object.keys(body).filter((key) => !allowed.includes(key));
         if (extra.length > 0) {
           response.writeHead(422, { "content-type": "application/json" });
@@ -273,9 +284,16 @@ test("cutout and upscale upload their source and send only fields the API accept
 
     assert.equal(result.code, 0, result.stderr);
     assert.ok(uploaded, `${command} must upload its source image`);
-    // The operation is carried by the prompt and the attached asset. Naming it in the
-    // body is what the server rejects, so assert the exact key set that goes out.
-    assert.deepEqual(Object.keys(execute.body).sort(), ["input_asset_id", "prompt"]);
+    // Naming the operation is the point of these commands: it stops a weak prompt being
+    // re-read and coming back as a question instead of an image.
+    assert.deepEqual(
+      Object.keys(execute.body).sort(),
+      ["input_asset_id", "operation", "prompt"],
+    );
+    assert.equal(
+      execute.body.operation,
+      command === "cutout" ? "background_remove" : "upscale",
+    );
     assert.ok(execute.body.prompt.length > 0, `${command} must send a prompt`);
   }
 });
@@ -301,7 +319,8 @@ test("generate sends only the fields /v1/execute accepts", async () => {
   api.close();
 
   assert.equal(result.code, 0, result.stderr);
-  assert.deepEqual(Object.keys(execute.body).sort(), ["aspect_ratio", "prompt"]);
+  assert.deepEqual(Object.keys(execute.body).sort(), ["aspect_ratio", "operation", "prompt"]);
+  assert.equal(execute.body.operation, "text_to_image");
 });
 
 test("an error in the {error:{message}} shape surfaces the reason, not a bare status", async () => {
@@ -329,4 +348,62 @@ test("a bad file is rejected locally, before anything is uploaded or charged", a
   assert.equal(result.code, 1);
   assert.match(result.stderr, /cannot read/);
   assert.equal(touched, 0, "an unreadable file must never reach the API");
+});
+
+test("refuses to send the key to a host that is not DreamLayer", async () => {
+  // In August a build pointed the endpoint at the bare marketing apex and every request
+  // carried Authorization there for two days. The origin passed every cleanliness check
+  // because those check a URL's SHAPE, never which host it names.
+  const result = await runCli(["capabilities"], {
+    DREAMLAYER_API_URL: "https://dreamlayer.io",
+  });
+
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /Refusing to send an API key to dreamlayer\.io/);
+  assert.match(result.stderr, /Expected api\.dreamlayer\.io/);
+});
+
+test("the override exists, so a real alternate deployment is still reachable", async () => {
+  const api = await listen(fakeApi({ events: [] }));
+  const result = await runCli(["capabilities"], {
+    DREAMLAYER_API_URL: api.url,
+    DREAMLAYER_ALLOW_ANY_HOST: "1",
+  });
+  api.close();
+  assert.equal(result.code, 0, result.stderr);
+});
+
+test("never sends the key to an off-origin download_url", async () => {
+  // download_url arrives in the event stream and is validated only as text. Node strips
+  // Authorization across a cross-origin REDIRECT, but the first request goes wherever
+  // the field says, so the header has to be gated on the origin instead.
+  const seen = [];
+  const thief = createServer((request, response) => {
+    seen.push(request.headers.authorization ?? null);
+    response.writeHead(200, { "content-type": "image/png" }).end(PNG);
+  });
+  await new Promise((resolve) => thief.listen(0, "127.0.0.1", resolve));
+  const thiefUrl = `http://127.0.0.1:${thief.address().port}/stolen.png`;
+
+  const api = await listen(
+    fakeApi({
+      events: [
+        started,
+        {
+          event: "asset",
+          data: { asset_id: "44444444-4444-4444-8444-444444444444", download_url: thiefUrl },
+        },
+        { event: "done", data: { status: "completed" } },
+      ],
+    }),
+  );
+  const result = await runCli(
+    ["generate", "a cat", "--out", path.join(temp, "off.png"), "--quiet"],
+    { DREAMLAYER_API_URL: api.url },
+  );
+  api.close();
+  thief.close();
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(seen, [null], `the key was sent off-origin: ${JSON.stringify(seen)}`);
 });
