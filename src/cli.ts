@@ -19,7 +19,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { ApiError, ManagedClient } from "./client.js";
-import type { ManagedExecuteInput, ManagedOperation } from "./client.js";
+import type { ManagedExecuteInput } from "./client.js";
 import { Progress, consume } from "./render.js";
 
 const USAGE = `dreamlayer - generate and edit images from your terminal
@@ -173,15 +173,10 @@ async function run(
   return 0;
 }
 
-async function imageCommand(
-  operation: ManagedOperation,
-  prompt: string,
-  file: string,
-  options: Options,
-): Promise<number> {
+async function imageCommand(prompt: string, file: string, options: Options): Promise<number> {
   const api = client();
   const inputAssetId = await upload(api, file);
-  return run(api, { prompt, operation, input_asset_id: inputAssetId }, options);
+  return run(api, { prompt, input_asset_id: inputAssetId }, options);
 }
 
 function exitCodeFor(error: ApiError): number {
@@ -208,26 +203,22 @@ async function main(argv: string[]): Promise<number> {
     case "generate": {
       const prompt = positional[0];
       if (!prompt) throw new UsageError("generate needs a prompt");
-      return run(
-        client(),
-        { prompt, operation: "text_to_image", aspect_ratio: options.aspect },
-        options,
-      );
+      return run(client(), { prompt, aspect_ratio: options.aspect }, options);
     }
     case "edit": {
       const [file, prompt] = positional;
       if (!file || !prompt) throw new UsageError("edit needs an image and a prompt");
-      return imageCommand("image_to_image", prompt, file, options);
+      return imageCommand(prompt, file, options);
     }
     case "cutout": {
       const file = positional[0];
       if (!file) throw new UsageError("cutout needs an image");
-      return imageCommand("background_remove", "remove the background", file, options);
+      return imageCommand("remove the background", file, options);
     }
     case "upscale": {
       const file = positional[0];
       if (!file) throw new UsageError("upscale needs an image");
-      return imageCommand("upscale", "upscale this image", file, options);
+      return imageCommand("upscale this image", file, options);
     }
     case "answer": {
       const [conversationId, text] = positional;

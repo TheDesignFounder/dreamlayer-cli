@@ -54,11 +54,33 @@ function fakeApi(behaviour) {
       return;
     }
     if (request.url === "/v1/execute") {
-      request.resume();
+      let raw = "";
+      request.on("data", (chunk) => (raw += chunk));
       request.on("end", () => {
+        const body = raw ? JSON.parse(raw) : {};
+        calls[calls.length - 1].body = body;
+
+        // The real request model is CLOSED: an unknown key is a 422, not a field the
+        // server quietly ignores. Mirror that, or a client that invents a field passes
+        // every test here and 422s on every call against production.
+        const allowed = ["prompt", "respond", "conversation_id", "input_asset_id", "aspect_ratio"];
+        const extra = Object.keys(body).filter((key) => !allowed.includes(key));
+        if (extra.length > 0) {
+          response.writeHead(422, { "content-type": "application/json" });
+          response.end(
+            JSON.stringify({
+              error: {
+                code: "VALIDATION_FAILED",
+                message: `Extra inputs are not permitted: ${extra.join(", ")}`,
+              },
+            }),
+          );
+          return;
+        }
+
         if (behaviour.status && behaviour.status !== 200) {
           response.writeHead(behaviour.status, { "content-type": "application/json" });
-          response.end(JSON.stringify({ detail: behaviour.detail ?? "nope" }));
+          response.end(JSON.stringify(behaviour.body ?? { detail: behaviour.detail ?? "nope" }));
           return;
         }
         response.writeHead(200, { "content-type": "text/event-stream" });
@@ -225,11 +247,8 @@ test("--json emits parseable output and still writes the file", async () => {
   assert.doesNotMatch(result.stdout, /dlr_live_test/);
 });
 
-test("cutout and upscale name their operation instead of hoping a prompt is read right", async () => {
-  for (const [command, expected] of [
-    ["cutout", "background_remove"],
-    ["upscale", "upscale"],
-  ]) {
+test("cutout and upscale upload their source and send only fields the API accepts", async () => {
+  for (const command of ["cutout", "upscale"]) {
     const api = await listen(
       fakeApi({
         events: [
@@ -249,12 +268,54 @@ test("cutout and upscale name their operation instead of hoping a prompt is read
       { DREAMLAYER_API_URL: api.url },
     );
     const uploaded = api.calls.some((call) => call.url === "/v1/input-assets");
+    const execute = api.calls.find((call) => call.url === "/v1/execute");
     api.close();
 
     assert.equal(result.code, 0, result.stderr);
     assert.ok(uploaded, `${command} must upload its source image`);
-    assert.ok(expected, "operation name present");
+    // The operation is carried by the prompt and the attached asset. Naming it in the
+    // body is what the server rejects, so assert the exact key set that goes out.
+    assert.deepEqual(Object.keys(execute.body).sort(), ["input_asset_id", "prompt"]);
+    assert.ok(execute.body.prompt.length > 0, `${command} must send a prompt`);
   }
+});
+
+test("generate sends only the fields /v1/execute accepts", async () => {
+  const api = await listen(
+    fakeApi({
+      events: [
+        started,
+        {
+          event: "asset",
+          data: { asset_id: "44444444-4444-4444-8444-444444444444", download_url: "ASSET" },
+        },
+        { event: "done", data: { status: "completed" } },
+      ],
+    }),
+  );
+  const result = await runCli(
+    ["generate", "a glass greenhouse at dusk", "--out", path.join(temp, "gen.png"), "--quiet"],
+    { DREAMLAYER_API_URL: api.url },
+  );
+  const execute = api.calls.find((call) => call.url === "/v1/execute");
+  api.close();
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(Object.keys(execute.body).sort(), ["aspect_ratio", "prompt"]);
+});
+
+test("an error in the {error:{message}} shape surfaces the reason, not a bare status", async () => {
+  const api = await listen(
+    fakeApi({
+      status: 422,
+      body: { error: { code: "VALIDATION_FAILED", message: "Request body failed validation" } },
+    }),
+  );
+  const result = await runCli(["generate", "x", "--quiet"], { DREAMLAYER_API_URL: api.url });
+  api.close();
+
+  assert.equal(result.code, 4);
+  assert.match(result.stderr, /Request body failed validation/);
 });
 
 test("a bad file is rejected locally, before anything is uploaded or charged", async () => {

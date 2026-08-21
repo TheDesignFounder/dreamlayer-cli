@@ -28,7 +28,12 @@ export type ManagedEvent = {
   data: Record<string, unknown>;
 };
 
-/** Every operation the Agent API can execute. Omit it and DreamLayer reads the prompt. */
+/**
+ * Every operation the Agent API can execute, as reported by /v1/capabilities.
+ *
+ * NOT a request field. /v1/execute rejects `operation` with 422 extra_forbidden; the
+ * server infers the operation from the prompt and whether an input asset is attached.
+ */
 export type ManagedOperation =
   | "text_to_image"
   | "image_to_image"
@@ -41,7 +46,6 @@ export type ManagedExecuteInput = {
   conversation_id?: string;
   input_asset_id?: string;
   aspect_ratio?: string;
-  operation?: ManagedOperation;
 };
 
 export type ManagedInputAsset = {
@@ -99,7 +103,13 @@ async function apiError(response: Response, surface = "DreamLayer Agent API"): P
       return new ApiError(response.status, surface);
     }
     const parsed = JSON.parse(await response.text()) as unknown;
-    if (isRecord(parsed)) detail = sanitizedErrorDetail(parsed.detail);
+    if (isRecord(parsed)) {
+      // Two shapes in the wild: {"detail": "..."} and {"error": {"message": "..."}}.
+      detail = sanitizedErrorDetail(parsed.detail);
+      if (!detail && isRecord(parsed.error)) {
+        detail = sanitizedErrorDetail(parsed.error.message);
+      }
+    }
   } catch {
     detail = null;
   }
