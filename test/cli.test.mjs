@@ -534,3 +534,26 @@ test("answer --image uploads the file and completes the question it was asked", 
   );
   assert.equal(result.stdout.trim(), out);
 });
+
+test("every operation the client can name is reachable from a command", async () => {
+  // Coverage, derived from source rather than restated. The sibling test above loops
+  // over a hand-written ["cutout", "upscale"], which proves those two work and says
+  // nothing about a third. Adding a case to ManagedOperation without wiring a command
+  // ships a client that can describe work no user can ask for, and every existing test
+  // stays green because none of them knows the operation exists.
+  //
+  // The type is erased at runtime, so this reads the source. That is the point: it is
+  // the only place the full set is written down once.
+  const clientSrc = await readFile(new URL("../src/client.ts", import.meta.url), "utf8");
+  const cliSrc = await readFile(new URL("../src/cli.ts", import.meta.url), "utf8");
+
+  const block = clientSrc.match(/export type ManagedOperation =([\s\S]*?);/);
+  assert.ok(block, "ManagedOperation is no longer declared the way this test reads it");
+  const operations = [...block[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+  assert.ok(operations.length >= 4, `parsed too few operations: ${operations}`);
+
+  const unreachable = operations.filter(
+    (op) => !cliSrc.includes(`operation: "${op}"`) && !cliSrc.includes(`imageCommand("${op}"`),
+  );
+  assert.deepEqual(unreachable, [], `no CLI command dispatches these: ${unreachable}`);
+});
