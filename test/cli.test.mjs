@@ -407,3 +407,80 @@ test("never sends the key to an off-origin download_url", async () => {
   assert.equal(result.code, 0, result.stderr);
   assert.deepEqual(seen, [null], `the key was sent off-origin: ${JSON.stringify(seen)}`);
 });
+
+test("an edit instruction with no image asks for one, and exit 6 stays reachable", async () => {
+  // Naming an operation suppresses the CLASSIFIER's clarifying questions, which was
+  // confirmed live: every CLI command names one, and none of them came back as a
+  // question. That made `answer` and exit 6 look like dead surface.
+  //
+  // They are not. The server computes needs_input SEPARATELY from operation:
+  //   needs_input   = _needs_input(message, input_asset_id)
+  //   route_prepared = needs_input or body.operation is not None
+  // So an edit-shaped prompt with no attached image still asks "Which image should I
+  // use?", which is the useful case: someone typed an edit into `generate` and gets
+  // asked for the picture instead of a nonsense image.
+  //
+  // This pins that path deterministically and for free, so it cannot quietly become
+  // unreachable and leave the CLI advertising an outcome it can no longer produce.
+  const api = await listen(
+    fakeApi({
+      events: [
+        started,
+        {
+          event: "question",
+          data: {
+            question_id: "55555555-5555-4555-8555-555555555555",
+            conversation_id: "33333333-3333-4333-8333-333333333333",
+            text: "Which image should I use? Upload or attach one, then respond.",
+          },
+        },
+        { event: "done", data: { status: "needs_input" } },
+      ],
+    }),
+  );
+
+  const result = await runCli(["generate", "remove the background", "--quiet"], {
+    DREAMLAYER_API_URL: api.url,
+  });
+  api.close();
+
+  assert.equal(result.code, 6, "a question is its own outcome, not a failure");
+  assert.match(result.stderr, /Which image should I use/);
+  assert.match(result.stderr, /dreamlayer answer 33333333-3333-4333-8333-333333333333/);
+  assert.equal(result.stdout, "", "no result means stdout stays clean for pipes");
+});
+
+test("answer sends respond and conversation_id, and names no operation", async () => {
+  // The reply to a question must NOT name an operation: the conversation already
+  // carries that decision, and re-asserting it here would be the client overriding
+  // state the server owns.
+  const api = await listen(
+    fakeApi({
+      events: [
+        started,
+        {
+          event: "asset",
+          data: { asset_id: "44444444-4444-4444-8444-444444444444", download_url: "ASSET" },
+        },
+        { event: "done", data: { status: "completed" } },
+      ],
+    }),
+  );
+
+  const result = await runCli(
+    [
+      "answer",
+      "33333333-3333-4333-8333-333333333333",
+      "use the product shot",
+      "--out",
+      path.join(temp, "answered.png"),
+      "--quiet",
+    ],
+    { DREAMLAYER_API_URL: api.url },
+  );
+  const execute = api.calls.find((call) => call.url === "/v1/execute");
+  api.close();
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(Object.keys(execute.body).sort(), ["conversation_id", "respond"]);
+});
