@@ -4,16 +4,38 @@
   "description": "Generate and edit images from your terminal, over local files, with one API key.",
   "license": "MIT",
   "type": "module",
-  "bin": { "dreamlayer": "./dist/cli.js" },
-  "files": ["dist", "README.md", "LICENSE", "NOTICE"],
-  "engines": { "node": ">=22.12" },
+  "bin": {
+    "dreamlayer": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
     "test": "pnpm build && node --test test/*.test.mjs",
-    "pack:check": "npm pack --dry-run"
+    "pack:check": "npm pack --dry-run",
+    "prepublishOnly": "pnpm test"
   },
-  "devDependencies": { "typescript": "5.9.2", "@types/node": "^22.10.0" },
-  "keywords": ["image-generation", "cli", "dreamlayer", "ai", "image-editing"],
-  "repository": { "type": "git", "url": "git+https://github.com/TheDesignFounder/dreamlayer-cli.git" },
+  "devDependencies": {
+    "typescript": "5.9.2",
+    "@types/node": "^22.10.0"
+  },
+  "keywords": [
+    "image-generation",
+    "cli",
+    "dreamlayer",
+    "ai",
+    "image-editing"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TheDesignFounder/dreamlayer-cli.git"
+  },
   "homepage": "https://docs.dreamlayer.io/cli"
 }
