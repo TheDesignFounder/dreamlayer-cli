@@ -30,7 +30,7 @@ function fakeApi(behaviour) {
 
     if (request.url === "/v1/capabilities") {
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ api_version: "1", key_mode: "live" }));
+      response.end(JSON.stringify(behaviour.capabilities ?? { api_version: "1", key_mode: "live" }));
       return;
     }
     if (request.url === "/v1/input-assets") {
@@ -547,8 +547,10 @@ test("every operation the client can name is reachable from a command", async ()
   const clientSrc = await readFile(new URL("../src/client.ts", import.meta.url), "utf8");
   const cliSrc = await readFile(new URL("../src/cli.ts", import.meta.url), "utf8");
 
-  const block = clientSrc.match(/export type ManagedOperation =([\s\S]*?);/);
-  assert.ok(block, "ManagedOperation is no longer declared the way this test reads it");
+  // Reads KNOWN_OPERATIONS, which is now the single definition: ManagedOperation is
+  // derived from it rather than written out a second time.
+  const block = clientSrc.match(/export const KNOWN_OPERATIONS = \[([\s\S]*?)\] as const;/);
+  assert.ok(block, "KNOWN_OPERATIONS is no longer declared the way this test reads it");
   const operations = [...block[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
   assert.ok(operations.length >= 4, `parsed too few operations: ${operations}`);
 
@@ -629,4 +631,49 @@ test("a slow job is not a dead connection, and a dead one names the job", async 
     /dreamlayer status 22222222-2222-4222-8222-222222222222/,
     "the execution id arrived in `started` and must not be discarded",
   );
+});
+
+test("capabilities says so when this build and the server disagree", async () => {
+  // The CLI cannot do what the MCP does. ManagedOperation is a compile-time union and
+  // `cutout` / `upscale` are compile-time commands, so deriving the list at runtime
+  // would buy consistency by giving up type safety at every call site. It reports
+  // instead of adapting, and it reports HERE because `capabilities` is free, spends
+  // nothing, and is the command people are told to run first.
+  //
+  // Both directions matter. A server that offers more means the user is missing a
+  // feature they are paying for. A client that names more is the failure that shipped
+  // on 2026-08-21, where a doomed call looked like a client bug rather than version skew.
+  const api = await listen(
+    fakeApi({ capabilities: { api_version: "1", key_mode: "live", operations: ["text_to_image", "colorize"] } }),
+  );
+  const result = await runCli(["capabilities"], { DREAMLAYER_API_URL: api.url });
+  api.close();
+
+  assert.equal(result.code, 0, "drift is a warning, not a failure");
+  // stdout stays clean JSON: this command gets piped into jq.
+  JSON.parse(result.stdout);
+  assert.match(result.stderr, /server offers, this version cannot use: colorize/);
+  assert.match(result.stderr, /npm i -g dreamlayer/);
+  assert.match(
+    result.stderr,
+    /this version names, the server will not run: .*upscale/i,
+    "must also name what this build offers that the server will not run",
+  );
+});
+
+test("capabilities stays quiet when the lists agree", async () => {
+  const api = await listen(
+    fakeApi({
+      capabilities: {
+        api_version: "1",
+        key_mode: "live",
+        operations: ["text_to_image", "image_to_image", "background_remove", "upscale"],
+      },
+    }),
+  );
+  const result = await runCli(["capabilities"], { DREAMLAYER_API_URL: api.url });
+  api.close();
+
+  assert.equal(result.code, 0);
+  assert.doesNotMatch(result.stderr, /disagree/, "no warning when there is nothing to warn about");
 });

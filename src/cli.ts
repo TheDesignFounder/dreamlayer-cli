@@ -20,6 +20,7 @@ import path from "node:path";
 
 import {
   ApiError,
+  KNOWN_OPERATIONS,
   ManagedClient,
   StreamIdleError,
 } from "./client.js";
@@ -215,6 +216,51 @@ function recoveryHint(error: unknown): string {
   return id ? `The job may still be running. Check it with:\n  dreamlayer status ${id}\n` : "";
 }
 
+
+/**
+ * Say so when this build and the server disagree about what exists.
+ *
+ * The MCP package solves this by asking the server at startup and shaping its tool
+ * schema from the answer. The CLI cannot: `ManagedOperation` is a compile-time union and
+ * `cutout` / `upscale` are compile-time commands, so deriving the list at runtime would
+ * buy consistency by giving up type safety at every call site.
+ *
+ * So it reports instead of adapting, and it does so HERE because `capabilities` is free,
+ * spends nothing, and is the command people are told to run first. Both directions are
+ * worth naming:
+ *
+ *   - the server offers something this build cannot reach -> the user is missing a
+ *     feature they are paying for and would never know
+ *   - this build names something the server will not run -> the failure that shipped on
+ *     2026-08-21, where a call looked like a client bug rather than a version skew
+ *
+ * stderr, never stdout: `dreamlayer capabilities` is piped into jq.
+ */
+function warnIfOperationsDrifted(capabilities: unknown): void {
+  const listed = (capabilities as { operations?: unknown }).operations;
+  if (!Array.isArray(listed) || listed.some((o) => typeof o !== "string")) return;
+
+  const server = new Set(listed as string[]);
+  const mine = new Set<string>(KNOWN_OPERATIONS);
+  const serverOnly = [...server].filter((o) => !mine.has(o));
+  const clientOnly = [...mine].filter((o) => !server.has(o));
+  if (serverOnly.length === 0 && clientOnly.length === 0) return;
+
+  process.stderr.write("\nThis CLI and the server disagree about the operation list.\n");
+  if (serverOnly.length > 0) {
+    process.stderr.write(
+      `  The server offers, this version cannot use: ${serverOnly.join(", ")}\n` +
+        "  Upgrade with: npm i -g dreamlayer\n",
+    );
+  }
+  if (clientOnly.length > 0) {
+    process.stderr.write(
+      `  This version names, the server will not run: ${clientOnly.join(", ")}\n` +
+        "  Those commands will fail validation until the server catches up.\n",
+    );
+  }
+}
+
 function exitCodeFor(error: ApiError): number {
   if (error.status === 401 || error.status === 403) return 2;
   if (error.status === 402) return 3;
@@ -289,6 +335,7 @@ async function main(argv: string[]): Promise<number> {
     case "capabilities": {
       const capabilities = await client().getCapabilities();
       process.stdout.write(`${JSON.stringify(capabilities, null, 2)}\n`);
+      warnIfOperationsDrifted(capabilities);
       return 0;
     }
     default:
