@@ -29,12 +29,13 @@ USAGE
   dreamlayer edit <image> <prompt> [--out <file>]
   dreamlayer cutout <image> [--out <file>]
   dreamlayer upscale <image> [--out <file>]
-  dreamlayer answer <conversation-id> <text> [--out <file>]
+  dreamlayer answer <conversation-id> <text> [--image <file>] [--out <file>]
   dreamlayer status <execution-id>
   dreamlayer capabilities
 
 OPTIONS
   --out <file>      Where to write the image. Default: dreamlayer-<n>.png
+  --image <file>    Attach an image when answering a question that asks for one
   --aspect <ratio>  1:1, 16:9, 9:16, 4:3, 3:4. Default 1:1
   --json            Machine-readable output on stdout
   --quiet           No progress on stderr
@@ -49,6 +50,7 @@ Every finished image costs one credit. A new account starts at zero.
 
 type Options = {
   out: string | null;
+  image: string | null;
   aspect: string;
   json: boolean;
   quiet: boolean;
@@ -61,6 +63,7 @@ function parseOptions(argv: string[]): { positional: string[]; options: Options 
   const positional: string[] = [];
   const options: Options = {
     out: null,
+    image: null,
     aspect: "1:1",
     json: false,
     quiet: false,
@@ -74,6 +77,10 @@ function parseOptions(argv: string[]): { positional: string[]; options: Options 
       const value = argv[++i];
       if (!value) throw new UsageError("--out needs a file path");
       options.out = value;
+    } else if (token === "--image") {
+      const value = argv[++i];
+      if (!value) throw new UsageError("--image needs a file path");
+      options.image = value;
     } else if (token === "--aspect") {
       const value = argv[++i];
       if (!value) throw new UsageError("--aspect needs a ratio");
@@ -144,8 +151,12 @@ async function run(
       process.stdout.write(`${JSON.stringify(outcome, null, 2)}\n`);
     } else {
       process.stderr.write(`\nDreamLayer needs one more thing:\n  ${outcome.question.text}\n\n`);
+      // The server's needs_input question always asks for an image, so point at the
+      // flag that can supply one rather than the bare form that will 422.
+      const wantsImage = /image/i.test(outcome.question.text);
       process.stderr.write(
-        `Answer it with:\n  dreamlayer answer ${outcome.conversation_id} "your answer"\n`,
+        `Answer it with:\n  dreamlayer answer ${outcome.conversation_id} "your answer"` +
+          `${wantsImage ? " --image <file>" : ""}\n`,
       );
     }
     return 6;
@@ -232,7 +243,21 @@ async function main(argv: string[]): Promise<number> {
     case "answer": {
       const [conversationId, text] = positional;
       if (!conversationId || !text) throw new UsageError("answer needs a conversation id and text");
-      return run(client(), { respond: text, conversation_id: conversationId }, options);
+      const api = client();
+      // A question that asks for an image cannot be answered with words alone: the
+      // server refuses a reply with no asset when the pending question required one.
+      // Without --image this command reached a clean 422 and the documented path
+      // dead-ended, telling the user to attach an image and offering no way to do it.
+      const input = options.image ? await upload(api, options.image) : undefined;
+      return run(
+        api,
+        {
+          respond: text,
+          conversation_id: conversationId,
+          ...(input ? { input_asset_id: input } : {}),
+        },
+        options,
+      );
     }
     case "status": {
       const executionId = positional[0];

@@ -23,7 +23,7 @@ dreamlayer generate <prompt> [--aspect 16:9] [--out file.png]
 dreamlayer edit <image> <prompt> [--out file.png]
 dreamlayer cutout <image> [--out file.png]      # background removal
 dreamlayer upscale <image> [--out file.png]     # 2x
-dreamlayer answer <conversation-id> <text>
+dreamlayer answer <conversation-id> <text> [--image file.png]
 dreamlayer status <execution-id>
 dreamlayer capabilities                         # spends nothing
 ```
@@ -75,8 +75,19 @@ dreamlayer generate "a fox logo" --idempotency-key fox-001
 
 ## A question is not a failure
 
-An ambiguous prompt exits 6 and prints the command to answer it. Naming an operation
-avoids the round trip entirely.
+An edit-shaped prompt with no image exits 6 and asks for one:
+
+```bash
+dreamlayer generate "remove the background"
+# Which image should I use? Upload or attach one, then respond.
+#   dreamlayer answer <id> "your answer" --image <file>
+```
+
+Answer it with the image attached. Words alone are refused, because the question is
+asking for a picture, not a clarification.
+
+Naming an operation avoids the round trip entirely, which is why `cutout`, `upscale`,
+`edit`, and `generate` all do.
 
 ## Requirements
 

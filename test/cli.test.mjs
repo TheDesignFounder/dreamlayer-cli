@@ -447,6 +447,9 @@ test("an edit instruction with no image asks for one, and exit 6 stays reachable
   assert.equal(result.code, 6, "a question is its own outcome, not a failure");
   assert.match(result.stderr, /Which image should I use/);
   assert.match(result.stderr, /dreamlayer answer 33333333-3333-4333-8333-333333333333/);
+  // The question asks for an image, so the suggested command has to be able to supply
+  // one. Without this the documented path dead-ends on "an input asset is required".
+  assert.match(result.stderr, /--image <file>/);
   assert.equal(result.stdout, "", "no result means stdout stays clean for pipes");
 });
 
@@ -483,4 +486,51 @@ test("answer sends respond and conversation_id, and names no operation", async (
 
   assert.equal(result.code, 0, result.stderr);
   assert.deepEqual(Object.keys(execute.body).sort(), ["conversation_id", "respond"]);
+});
+
+test("answer --image uploads the file and completes the question it was asked", async () => {
+  // The other half of the path. Answering a needs_input question with words alone is
+  // refused server-side: `pending_requires_asset and input_asset_id is None` is a 422.
+  // This guards against the dead end returning.
+  const api = await listen(
+    fakeApi({
+      events: [
+        started,
+        {
+          event: "asset",
+          data: { asset_id: "44444444-4444-4444-8444-444444444444", download_url: "ASSET" },
+        },
+        { event: "done", data: { status: "completed" } },
+      ],
+    }),
+  );
+  const source = path.join(temp, "answer-source.png");
+  await (await import("node:fs/promises")).writeFile(source, PNG);
+  const out = path.join(temp, "answered-with-image.png");
+
+  const result = await runCli(
+    [
+      "answer",
+      "33333333-3333-4333-8333-333333333333",
+      "use this one",
+      "--image",
+      source,
+      "--out",
+      out,
+      "--quiet",
+    ],
+    { DREAMLAYER_API_URL: api.url },
+  );
+  const uploaded = api.calls.some((call) => call.url === "/v1/input-assets");
+  const execute = api.calls.find((call) => call.url === "/v1/execute");
+  api.close();
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(uploaded, "--image must upload before answering");
+  assert.deepEqual(
+    Object.keys(execute.body).sort(),
+    ["conversation_id", "input_asset_id", "respond"],
+    "the reply carries the asset, and still names no operation",
+  );
+  assert.equal(result.stdout.trim(), out);
 });
