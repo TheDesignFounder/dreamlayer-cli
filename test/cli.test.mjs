@@ -557,3 +557,76 @@ test("every operation the client can name is reachable from a command", async ()
   );
   assert.deepEqual(unreachable, [], `no CLI command dispatches these: ${unreachable}`);
 });
+
+test("a slow job is not a dead connection, and a dead one names the job", async () => {
+  // The shipped bug, reproduced. REQUEST_TIMEOUT_MS was a TOTAL cap of 130s applied to
+  // the stream, and an upscale of a 2048px image takes about 150s server-side. So
+  // `dreamlayer upscale` failed 100% of the time on a normal input, after the server had
+  // already done the work and charged for it.
+  //
+  // Two halves, and the first is why raising the constant is not the fix:
+  //   1. a job that takes longer than any fixed cap, but keeps the line warm, SUCCEEDS
+  //   2. a connection that genuinely dies is still caught, exits 5, and names the job
+  //
+  // A total-duration timeout cannot tell these apart. An idle timeout can, which is
+  // exactly what the server's `: keepalive` comments are for.
+  // Half 1: dribble keepalives past any plausible fixed cap, then finish.
+  const slow = createServer((request, response) => {
+    if (request.url === "/asset.png") {
+      response.writeHead(200, { "content-type": "image/png" });
+      response.end(PNG);
+      return;
+    }
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write(`id: 1\nevent: started\ndata: ${JSON.stringify(started.data)}\n\n`);
+    const origin = `http://127.0.0.1:${slow.address().port}`;
+    let ticks = 0;
+    // Dribble keepalives well past the idle window this run is configured with, so the
+    // ONLY thing keeping the stream alive is the resetting-on-bytes behaviour.
+    const beat = setInterval(() => {
+      ticks += 1;
+      response.write(": keepalive\n\n");
+      if (ticks >= 8) {
+        clearInterval(beat);
+        const asset = { asset_id: "44444444-4444-4444-8444-444444444444", download_url: `${origin}/asset.png` };
+        response.write(`id: 2\nevent: asset\ndata: ${JSON.stringify(asset)}\n\n`);
+        response.write(`id: 3\nevent: done\ndata: ${JSON.stringify({ status: "completed" })}\n\n`);
+        response.end();
+      }
+    }, 120);
+  });
+  await new Promise((resolve) => slow.listen(0, "127.0.0.1", resolve));
+  const temp = await mkdtemp(path.join(tmpdir(), "dl-idle-"));
+  const slowResult = await runCli(
+    ["generate", "a greenhouse", "--out", path.join(temp, "o.png"), "--quiet"],
+    {
+      DREAMLAYER_API_URL: `http://127.0.0.1:${slow.address().port}`,
+      // 400ms idle window, 8 beats at 120ms = ~960ms of stream. A total-duration cap of
+      // 400ms would kill this; an idle one must not.
+      DREAMLAYER_STREAM_IDLE_MS: "400",
+    },
+  );
+  slow.close();
+  assert.equal(slowResult.code, 0, `a live-but-slow stream must succeed: ${slowResult.stderr}`);
+
+  // Half 2: send `started`, then never speak again.
+  const dead = createServer((request, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write(`id: 1\nevent: started\ndata: ${JSON.stringify(started.data)}\n\n`);
+    // deliberately no end(), no further bytes
+  });
+  await new Promise((resolve) => dead.listen(0, "127.0.0.1", resolve));
+  const deadResult = await runCli(["generate", "a greenhouse", "--quiet"], {
+    DREAMLAYER_API_URL: `http://127.0.0.1:${dead.address().port}`,
+    DREAMLAYER_STREAM_IDLE_MS: "400",
+  });
+  dead.close();
+
+  assert.equal(deadResult.code, 5, `a dead stream is retryable, not a generic crash: ${deadResult.stderr}`);
+  assert.match(deadResult.stderr, /--idempotency-key/, "the double-charge guard must print");
+  assert.match(
+    deadResult.stderr,
+    /dreamlayer status 22222222-2222-4222-8222-222222222222/,
+    "the execution id arrived in `started` and must not be discarded",
+  );
+});

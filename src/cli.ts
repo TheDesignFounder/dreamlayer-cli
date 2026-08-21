@@ -18,7 +18,11 @@ import { randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { ApiError, ManagedClient } from "./client.js";
+import {
+  ApiError,
+  ManagedClient,
+  StreamIdleError,
+} from "./client.js";
 import type { ManagedExecuteInput, ManagedOperation } from "./client.js";
 import { Progress, consume } from "./render.js";
 
@@ -195,6 +199,22 @@ async function imageCommand(
   return run(api, { prompt, operation, input_asset_id: inputAssetId }, options);
 }
 
+/**
+ * Point a user at the job they may have paid for.
+ *
+ * Without this, a timed-out upscale left nothing to go on: no id, no command, and no
+ * key-authenticated way to check a balance. "It might have charged you, good luck" is
+ * not an acceptable end state for a paid call.
+ */
+function recoveryHint(error: unknown): string {
+  const id =
+    error !== null && typeof error === "object"
+      ? (error as { partialOutcome?: { execution_id: string | null } }).partialOutcome
+          ?.execution_id
+      : null;
+  return id ? `The job may still be running. Check it with:\n  dreamlayer status ${id}\n` : "";
+}
+
 function exitCodeFor(error: ApiError): number {
   if (error.status === 401 || error.status === 403) return 2;
   if (error.status === 402) return 3;
@@ -297,6 +317,19 @@ main(process.argv.slice(2))
       process.exitCode = exitCodeFor(error);
       return;
     }
+    // A stream that went silent is retryable, and it is the failure MOST likely to
+    // have been charged for: the server may have finished the job we stopped listening
+    // to. It reached this generic branch as a bare DOMException, so it exited 1 with no
+    // guidance, and the --idempotency-key advice that exists precisely to prevent
+    // double payment never printed on the one case that needs it.
+    if (error instanceof StreamIdleError) {
+      process.stderr.write(`${error.message}\n`);
+      process.stderr.write("Temporary. Retry with --idempotency-key to avoid paying twice.\n");
+      process.stderr.write(recoveryHint(error));
+      process.exitCode = 5;
+      return;
+    }
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(recoveryHint(error));
     process.exitCode = 1;
   });

@@ -86,34 +86,48 @@ export async function consume(
     last_event_id: null,
   };
 
-  for await (const event of stream) {
-    onEvent?.(event);
-    outcome.last_event_id = event.id;
-    const label = describe(event);
-    if (label) progress.set(label);
+  try {
+    for await (const event of stream) {
+      onEvent?.(event);
+      outcome.last_event_id = event.id;
+      const label = describe(event);
+      if (label) progress.set(label);
 
-    if (event.event === "started") {
-      outcome.execution_id = String(event.data.execution_id);
-      outcome.conversation_id = String(event.data.conversation_id);
-    } else if (event.event === "asset") {
-      outcome.asset = {
-        asset_id: String(event.data.asset_id),
-        download_url: String(event.data.download_url),
-      };
-    } else if (event.event === "question") {
-      outcome.question = {
-        question_id: String(event.data.question_id),
-        text: String(event.data.text),
-      };
-      if (event.data.conversation_id) {
+      if (event.event === "started") {
+        outcome.execution_id = String(event.data.execution_id);
         outcome.conversation_id = String(event.data.conversation_id);
-      }
-    } else if (event.event === "done") {
-      outcome.status = String(event.data.status);
-      if (event.data.conversation_id) {
-        outcome.conversation_id = String(event.data.conversation_id);
+      } else if (event.event === "asset") {
+        outcome.asset = {
+          asset_id: String(event.data.asset_id),
+          download_url: String(event.data.download_url),
+        };
+      } else if (event.event === "question") {
+        outcome.question = {
+          question_id: String(event.data.question_id),
+          text: String(event.data.text),
+        };
+        if (event.data.conversation_id) {
+          outcome.conversation_id = String(event.data.conversation_id);
+        }
+      } else if (event.event === "done") {
+        outcome.status = String(event.data.status);
+        if (event.data.conversation_id) {
+          outcome.conversation_id = String(event.data.conversation_id);
+        }
       }
     }
+  } catch (error) {
+    // `started` arrives within seconds and carries the execution id. When the stream
+    // later dies, that id is the only way a user can find a job they may already have
+    // paid for, and it was being discarded along with the exception.
+    //
+    // Attached to the error rather than wrapped in a new one: the top-level handler
+    // branches on `instanceof ApiError`, and a wrapper would silently defeat that
+    // while looking tidier.
+    if (error !== null && typeof error === "object") {
+      (error as { partialOutcome?: Outcome }).partialOutcome = outcome;
+    }
+    throw error;
   }
   return outcome;
 }
