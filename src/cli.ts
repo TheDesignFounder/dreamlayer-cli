@@ -115,12 +115,19 @@ function client(): ManagedClient {
   return new ManagedClient(key, (process.env.DREAMLAYER_API_URL ?? "https://api.dreamlayer.io").trim());
 }
 
-/** Upload a local file and return its asset id, with size and type checked here first. */
+const RAW_EXTENSIONS = new Set([
+  ".3fr", ".arw", ".cr2", ".cr3", ".dng", ".erf", ".fff", ".iiq", ".kdc",
+  ".mef", ".mos", ".mrw", ".nef", ".nrw", ".orf", ".pef", ".raf", ".raw",
+  ".rw2", ".rwl", ".sr2", ".srf", ".srw", ".x3f",
+]);
+const MAX_SOURCE_BYTES = 200 * 1024 * 1024;
+
+/** Upload a local file; the server owns RAW, EXIF, alpha, and resize normalization. */
 async function upload(api: ManagedClient, file: string): Promise<string> {
   const resolved = path.resolve(file);
   const extension = path.extname(resolved).toLowerCase();
-  if (![".png", ".jpg", ".jpeg", ".webp"].includes(extension)) {
-    throw new UsageError(`${file} is not a PNG, JPEG, or WEBP`);
+  if (![".png", ".jpg", ".jpeg", ".webp"].includes(extension) && !RAW_EXTENSIONS.has(extension)) {
+    throw new UsageError(`${file} is not a PNG, JPEG, WEBP, or supported camera RAW`);
   }
   let bytes: Buffer;
   try {
@@ -128,9 +135,9 @@ async function upload(api: ManagedClient, file: string): Promise<string> {
   } catch {
     throw new UsageError(`cannot read ${file}`);
   }
-  if (bytes.byteLength > 20 * 1024 * 1024) {
+  if (bytes.byteLength > MAX_SOURCE_BYTES) {
     throw new UsageError(
-      `${file} is ${Math.round(bytes.byteLength / 1024 / 1024)} MB; the limit is 20 MB`,
+      `${file} is ${Math.round(bytes.byteLength / 1024 / 1024)} MB; the limit is 200 MB`,
     );
   }
   const asset = await api.uploadInput(new Blob([new Uint8Array(bytes)]), path.basename(resolved));

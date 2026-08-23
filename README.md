@@ -31,6 +31,10 @@ dreamlayer capabilities                         # spends nothing
 `cutout` and `upscale` name their operation rather than hoping a sentence is read the
 way you meant, so they run a dedicated chain and never stop to ask a question.
 
+Image inputs may be PNG, JPEG, WebP, or supported camera RAW files up to 200 MB.
+DreamLayer develops RAW previews, applies camera orientation, and resizes oversized
+sources on the server before any operation runs.
+
 `upscale` doubles each side and finished images are capped at 4096 per side, so the
 longest side of your input must be 2048 or less. Anything larger is refused before it
 costs you a credit.

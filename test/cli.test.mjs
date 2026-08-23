@@ -48,6 +48,41 @@ function fakeApi(behaviour) {
       });
       return;
     }
+    if (request.url === "/v1/input-assets/uploads" && request.method === "POST") {
+      request.resume();
+      request.on("end", () => {
+        response.writeHead(201, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            upload_id: "11111111-1111-4111-8111-111111111111",
+            upload_url: "/v1/input-assets/uploads/11111111-1111-4111-8111-111111111111/raw",
+            http_method: "PUT",
+            mode: "proxied",
+            content_type: "application/octet-stream",
+            maximum_bytes: 209715200,
+            expires_at: "2030-01-01T00:00:00Z",
+          }),
+        );
+      });
+      return;
+    }
+    if (/^\/v1\/input-assets\/uploads\/[^/]+\/raw$/.test(request.url) && request.method === "PUT") {
+      request.resume();
+      request.on("end", () => response.writeHead(204).end());
+      return;
+    }
+    if (/^\/v1\/input-assets\/uploads\/[^/]+\/finalize$/.test(request.url) && request.method === "POST") {
+      response.writeHead(201, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          input_asset_id: "11111111-1111-4111-8111-111111111111",
+          width: 8,
+          height: 8,
+          expires_at: "2030-01-01T00:00:00Z",
+        }),
+      );
+      return;
+    }
     if (request.url === "/asset.png") {
       response.writeHead(200, { "content-type": "image/png" });
       response.end(PNG);
@@ -296,6 +331,35 @@ test("cutout and upscale upload their source and send only fields the API accept
     );
     assert.ok(execute.body.prompt.length > 0, `${command} must send a prompt`);
   }
+});
+
+test("a RAW source uses the staged normalization boundary before execute", async () => {
+  const api = await listen(
+    fakeApi({
+      events: [
+        started,
+        {
+          event: "asset",
+          data: { asset_id: "44444444-4444-4444-8444-444444444444", download_url: "ASSET" },
+        },
+        { event: "done", data: { status: "completed" } },
+      ],
+    }),
+  );
+  const source = path.join(temp, "camera-source.dng");
+  await (await import("node:fs/promises")).writeFile(source, PNG);
+  const result = await runCli(
+    ["upscale", source, "--out", path.join(temp, "raw-upscale.png"), "--quiet"],
+    { DREAMLAYER_API_URL: api.url },
+  );
+  const urls = api.calls.map((call) => `${call.method} ${call.url}`);
+  api.close();
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(urls.includes("POST /v1/input-assets/uploads"));
+  assert.ok(urls.some((value) => /PUT \/v1\/input-assets\/uploads\/[^/]+\/raw/.test(value)));
+  assert.ok(urls.some((value) => /POST \/v1\/input-assets\/uploads\/[^/]+\/finalize/.test(value)));
+  assert.ok(!urls.includes("POST /v1/input-assets"));
 });
 
 test("generate sends only the fields /v1/execute accepts", async () => {
