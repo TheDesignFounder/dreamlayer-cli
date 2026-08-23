@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,7 +55,9 @@ function fakeApi(behaviour) {
         response.end(
           JSON.stringify({
             upload_id: "11111111-1111-4111-8111-111111111111",
-            upload_url: "/v1/input-assets/uploads/11111111-1111-4111-8111-111111111111/raw",
+            upload_url:
+              behaviour.uploadUrl ??
+              "/v1/input-assets/uploads/11111111-1111-4111-8111-111111111111/raw",
             http_method: "PUT",
             mode: "proxied",
             content_type: "application/octet-stream",
@@ -67,8 +69,15 @@ function fakeApi(behaviour) {
       return;
     }
     if (/^\/v1\/input-assets\/uploads\/[^/]+\/raw$/.test(request.url) && request.method === "PUT") {
+      if (behaviour.stallUpload) return;
       request.resume();
-      request.on("end", () => response.writeHead(204).end());
+      request.on("end", () => {
+        if (behaviour.delayUploadMs) {
+          setTimeout(() => response.writeHead(204).end(), behaviour.delayUploadMs);
+        } else {
+          response.writeHead(204).end();
+        }
+      });
       return;
     }
     if (/^\/v1\/input-assets\/uploads\/[^/]+\/finalize$/.test(request.url) && request.method === "POST") {
@@ -360,6 +369,38 @@ test("a RAW source uses the staged normalization boundary before execute", async
   assert.ok(urls.some((value) => /PUT \/v1\/input-assets\/uploads\/[^/]+\/raw/.test(value)));
   assert.ok(urls.some((value) => /POST \/v1\/input-assets\/uploads\/[^/]+\/finalize/.test(value)));
   assert.ok(!urls.includes("POST /v1/input-assets"));
+});
+
+test("a 200 MB upload receives a size-scaled deadline", async () => {
+  const { uploadTimeoutMs } = await import("../dist/client.js");
+  assert.ok(uploadTimeoutMs(200 * 1024 * 1024) > 130_000);
+});
+
+test("a proxied upload URL cannot send the API key off origin", async () => {
+  const api = await listen(fakeApi({ uploadUrl: "http://127.0.0.1:9/steal" }));
+  const temp = await mkdtemp(path.join(tmpdir(), "dl-upload-origin-"));
+  const source = path.join(temp, "camera.dng");
+  await writeFile(source, PNG);
+  const result = await runCli(["edit", source, "brighten", "--quiet"], {
+    DREAMLAYER_API_URL: api.url,
+  });
+  api.close();
+  assert.equal(result.code, 5);
+  assert.match(result.stderr, /off-origin upload URL/);
+});
+
+test("a genuinely stalled staged upload is retryable", async () => {
+  const api = await listen(fakeApi({ stallUpload: true }));
+  const temp = await mkdtemp(path.join(tmpdir(), "dl-upload-stall-"));
+  const source = path.join(temp, "camera.dng");
+  await writeFile(source, PNG);
+  const result = await runCli(["edit", source, "brighten", "--quiet"], {
+    DREAMLAYER_API_URL: api.url,
+    DREAMLAYER_UPLOAD_TIMEOUT_MS: "100",
+  });
+  api.close();
+  assert.equal(result.code, 5);
+  assert.match(result.stderr, /--idempotency-key/);
 });
 
 test("generate sends only the fields /v1/execute accepts", async () => {

@@ -15,7 +15,8 @@
  *   6  the run ended asking a question instead of producing an image
  */
 import { randomUUID } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { openAsBlob } from "node:fs";
+import { stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -23,6 +24,7 @@ import {
   KNOWN_OPERATIONS,
   ManagedClient,
   StreamIdleError,
+  UploadTimeoutError,
 } from "./client.js";
 import type { ManagedExecuteInput, ManagedOperation } from "./client.js";
 import { Progress, consume } from "./render.js";
@@ -115,32 +117,23 @@ function client(): ManagedClient {
   return new ManagedClient(key, (process.env.DREAMLAYER_API_URL ?? "https://api.dreamlayer.io").trim());
 }
 
-const RAW_EXTENSIONS = new Set([
-  ".3fr", ".arw", ".cr2", ".cr3", ".dng", ".erf", ".fff", ".iiq", ".kdc",
-  ".mef", ".mos", ".mrw", ".nef", ".nrw", ".orf", ".pef", ".raf", ".raw",
-  ".rw2", ".rwl", ".sr2", ".srf", ".srw", ".x3f",
-]);
 const MAX_SOURCE_BYTES = 200 * 1024 * 1024;
 
 /** Upload a local file; the server owns RAW, EXIF, alpha, and resize normalization. */
 async function upload(api: ManagedClient, file: string): Promise<string> {
   const resolved = path.resolve(file);
-  const extension = path.extname(resolved).toLowerCase();
-  if (![".png", ".jpg", ".jpeg", ".webp"].includes(extension) && !RAW_EXTENSIONS.has(extension)) {
-    throw new UsageError(`${file} is not a PNG, JPEG, WEBP, or supported camera RAW`);
-  }
-  let bytes: Buffer;
+  let fileStat;
   try {
-    bytes = await readFile(resolved);
+    fileStat = await stat(resolved);
   } catch {
     throw new UsageError(`cannot read ${file}`);
   }
-  if (bytes.byteLength > MAX_SOURCE_BYTES) {
+  if (fileStat.size > MAX_SOURCE_BYTES) {
     throw new UsageError(
-      `${file} is ${Math.round(bytes.byteLength / 1024 / 1024)} MB; the limit is 200 MB`,
+      `${file} is ${Math.round(fileStat.size / 1024 / 1024)} MB; the limit is 200 MB`,
     );
   }
-  const asset = await api.uploadInput(new Blob([new Uint8Array(bytes)]), path.basename(resolved));
+  const asset = await api.uploadInput(await openAsBlob(resolved), path.basename(resolved));
   return asset.input_asset_id;
 }
 
@@ -380,6 +373,12 @@ main(process.argv.slice(2))
       process.stderr.write(`${error.message}\n`);
       process.stderr.write("Temporary. Retry with --idempotency-key to avoid paying twice.\n");
       process.stderr.write(recoveryHint(error));
+      process.exitCode = 5;
+      return;
+    }
+    if (error instanceof UploadTimeoutError) {
+      process.stderr.write(`${error.message}\n`);
+      process.stderr.write("Temporary. Retry with --idempotency-key to avoid paying twice.\n");
       process.exitCode = 5;
       return;
     }
