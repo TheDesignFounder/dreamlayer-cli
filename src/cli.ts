@@ -15,7 +15,7 @@
  *   6  the run ended asking a question instead of producing an image
  */
 import { randomUUID } from "node:crypto";
-import { openAsBlob } from "node:fs";
+import { openAsBlob, readFileSync } from "node:fs";
 import { stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -28,6 +28,12 @@ import {
 } from "./client.js";
 import type { ManagedExecuteInput, ManagedOperation } from "./client.js";
 import { Progress, consume } from "./render.js";
+
+const PACKAGE_VERSION = String(
+  (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+    version: unknown;
+  }).version,
+);
 
 const USAGE = `dreamlayer - generate and edit images from your terminal
 
@@ -275,7 +281,7 @@ async function main(argv: string[]): Promise<number> {
     return command ? 0 : 1;
   }
   if (command === "--version" || command === "-v") {
-    process.stdout.write("0.1.0\n");
+    process.stdout.write(`${PACKAGE_VERSION}\n`);
     return 0;
   }
 

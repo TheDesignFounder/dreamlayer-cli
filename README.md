@@ -12,10 +12,6 @@ dreamlayer generate "A glass greenhouse at dusk" --out greenhouse.png
 Get a key at [platform.dreamlayer.io](https://platform.dreamlayer.io). A new account
 starts at zero credits, and each finished image costs one.
 
-> **Not yet publishable.** This package sends an `operation` field that requires
-> the gateway build adding it to `ExecuteRequest`. Against the currently deployed
-> API every call returns `422 extra_forbidden`. Deploy that build first.
-
 ## Commands
 
 ```bash
