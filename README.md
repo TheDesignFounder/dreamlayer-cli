@@ -21,6 +21,7 @@ dreamlayer cutout <image> [--out file.png]      # background removal
 dreamlayer upscale <image> [--out file.png]     # 2x
 dreamlayer answer <conversation-id> <text> [--image file.png]
 dreamlayer status <execution-id>
+dreamlayer balance                              # spends nothing
 dreamlayer capabilities                         # spends nothing
 ```
 
@@ -52,7 +53,7 @@ open "$(dreamlayer generate 'a fox logo')"
 | 1 | Usage error |
 | 2 | Auth or account problem |
 | 3 | Out of credits |
-| 4 | Request rejected, will fail identically until you change it |
+| 4 | Non-retryable request or execution failure |
 | 5 | Temporary, worth retrying |
 | 6 | It asked a question instead of producing an image |
 
@@ -60,9 +61,19 @@ open "$(dreamlayer generate 'a fox logo')"
 for f in shots/*.png; do dreamlayer cutout "$f" --out "cut/$(basename "$f")" || break; done
 ```
 
-**`--json`** gives machine-readable output on stdout, carrying job state, execution ids,
-and the written path. It deliberately excludes your prompt, your images, and your key,
-so it is safe to paste into a bug report.
+**`--json`** gives machine-readable success output on stdout, carrying job state,
+execution ids, and the written path. Errors use the same stable `code`, `reason`,
+`message`, `retryable`, and `request_id` fields as REST and are written to stderr, so
+stdout stays result-only. Error envelopes deliberately exclude your prompt, images,
+local filenames, and key. Successful image JSON includes the destination path you chose;
+remove it before sharing if the local name is private.
+
+Check the authenticated key's own balance without starting image work:
+
+```bash
+dreamlayer balance
+dreamlayer balance --json
+```
 
 ## Retries are safe if you reuse the key
 
