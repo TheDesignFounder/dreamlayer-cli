@@ -25,6 +25,7 @@ import {
   ManagedClient,
   StreamIdleError,
   UploadTimeoutError,
+  terminalExecutionError,
 } from "./client.js";
 import type { ManagedExecuteInput, ManagedOperation } from "./client.js";
 import { Progress, consume } from "./render.js";
@@ -44,6 +45,7 @@ USAGE
   dreamlayer upscale <image> [--out <file>]
   dreamlayer answer <conversation-id> <text> [--image <file>] [--out <file>]
   dreamlayer status <execution-id>
+  dreamlayer balance
   dreamlayer capabilities
 
 OPTIONS
@@ -174,7 +176,11 @@ async function run(
   }
 
   if (outcome.status !== "completed" || !outcome.asset) {
-    progress.stop("Failed");
+    progress.stop(options.json ? undefined : "Failed");
+    if (outcome.status === "failed" && outcome.execution_id) {
+      const terminal = terminalExecutionError(await api.getExecution(outcome.execution_id));
+      if (terminal) throw terminal;
+    }
     if (options.json) process.stdout.write(`${JSON.stringify(outcome, null, 2)}\n`);
     else process.stderr.write(`Run ended as ${outcome.status}. No credit was settled.\n`);
     return 5;
@@ -268,10 +274,9 @@ function warnIfOperationsDrifted(capabilities: unknown): void {
 }
 
 function exitCodeFor(error: ApiError): number {
-  if (error.status === 401 || error.status === 403) return 2;
-  if (error.status === 402) return 3;
-  if (error.status === 409 || error.status === 422) return 4;
-  return 5;
+  if (error.reason === "authentication_failed" || error.reason === "access_denied") return 2;
+  if (error.reason === "insufficient_credits" || error.reason === "quota_exceeded") return 3;
+  return error.retryable ? 5 : 4;
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -338,6 +343,19 @@ async function main(argv: string[]): Promise<number> {
       process.stdout.write(`${JSON.stringify(execution, null, 2)}\n`);
       return 0;
     }
+    case "balance": {
+      if (positional.length > 0) throw new UsageError("balance takes no arguments");
+      const balance = await client().getBalance();
+      if (options.json) {
+        process.stdout.write(`${JSON.stringify(balance, null, 2)}\n`);
+      } else {
+        process.stdout.write(
+          `${balance.available} credits available ` +
+            `(${balance.promotional} promotional, ${balance.purchased} purchased)\n`,
+        );
+      }
+      return 0;
+    }
     case "capabilities": {
       const capabilities = await client().getCapabilities();
       process.stdout.write(`${JSON.stringify(capabilities, null, 2)}\n`);
@@ -361,12 +379,18 @@ main(process.argv.slice(2))
     }
     if (error instanceof ApiError) {
       const hint =
-        error.status === 402
+        error.reason === "insufficient_credits"
           ? "Buy credits at https://platform.dreamlayer.io/console/billing"
           : error.retryable
             ? "Temporary. Retry with --idempotency-key to avoid paying twice."
             : "";
-      process.stderr.write(`${error.message}${hint ? `\n${hint}` : ""}\n`);
+      if (process.argv.slice(2).includes("--json")) {
+        process.stderr.write(`${JSON.stringify(error.toPublicEnvelope())}\n`);
+      } else {
+        process.stderr.write(
+          `${error.message}\nReason: ${error.reason}${hint ? `\n${hint}` : ""}\n`,
+        );
+      }
       process.exitCode = exitCodeFor(error);
       return;
     }

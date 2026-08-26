@@ -33,6 +33,28 @@ function fakeApi(behaviour) {
       response.end(JSON.stringify(behaviour.capabilities ?? { api_version: "1", key_mode: "live" }));
       return;
     }
+    if (request.url === "/v1/balance") {
+      response.writeHead(behaviour.balanceStatus ?? 200, {
+        "content-type": "application/json",
+        "cache-control": "private, no-store",
+      });
+      response.end(
+        JSON.stringify(
+          behaviour.balanceBody ?? {
+            promotional: 3,
+            purchased: 5,
+            available: 8,
+            credit_usd: "0.17",
+          },
+        ),
+      );
+      return;
+    }
+    if (/^\/v1\/executions\/[^/]+$/.test(request.url) && request.method === "GET") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(behaviour.execution ?? {}));
+      return;
+    }
     if (request.url === "/v1/input-assets") {
       request.resume();
       request.on("end", () => {
@@ -256,6 +278,89 @@ test("running out of credits exits 3 and says where to buy them", async () => {
   assert.match(result.stderr, /billing/);
 });
 
+test("balance reads only the authenticated key's balance in human and JSON modes", async () => {
+  for (const args of [["balance"], ["balance", "--json"]]) {
+    const api = await listen(fakeApi({ events: [] }));
+    const result = await runCli(args, { DREAMLAYER_API_URL: api.url });
+    const balanceCall = api.calls.find((call) => call.url === "/v1/balance");
+    api.close();
+
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(balanceCall.method, "GET");
+    assert.equal(balanceCall.headers.authorization, "Bearer dlr_live_test");
+    assert.equal(balanceCall.headers["dreamlayer-version"], "1");
+    assert.equal(balanceCall.url, "/v1/balance", "no account selector may be sent");
+    if (args.includes("--json")) {
+      assert.deepEqual(JSON.parse(result.stdout), {
+        promotional: 3,
+        purchased: 5,
+        available: 8,
+        credit_usd: "0.17",
+      });
+    } else {
+      assert.equal(result.stdout, "8 credits available (3 promotional, 5 purchased)\n");
+    }
+  }
+});
+
+test("balance rejects inconsistent or expanded responses without echoing private fields", async () => {
+  const api = await listen(
+    fakeApi({
+      events: [],
+      balanceBody: {
+        promotional: 3,
+        purchased: 5,
+        available: 900,
+        credit_usd: "0.17",
+        private_account_name: "do-not-print-this",
+      },
+    }),
+  );
+  const result = await runCli(["balance", "--json"], { DREAMLAYER_API_URL: api.url });
+  api.close();
+
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /Invalid DreamLayer balance response/);
+  assert.doesNotMatch(result.stderr, /do-not-print-this/);
+  assert.equal(result.stdout, "");
+});
+
+test("402, 409, and 429 errors preserve the stable reason and retry contract", async () => {
+  const cases = [
+    [402, "insufficient_credits", false, 3],
+    [409, "too_many_active_jobs", true, 5],
+    [429, "rate_limited", true, 5],
+  ];
+  for (const [status, reason, retryable, exitCode] of cases) {
+    const api = await listen(
+      fakeApi({
+        status,
+        body: {
+          error: {
+            code: status === 402 ? "BUDGET_EXCEEDED" : "RATE_LIMITED",
+            reason,
+            message: "private-model said prompt filename.png was rejected",
+            retryable,
+            request_id: "99999999-9999-4999-8999-999999999999",
+          },
+        },
+      }),
+    );
+    const result = await runCli(["generate", "secret prompt", "--json", "--quiet"], {
+      DREAMLAYER_API_URL: api.url,
+    });
+    api.close();
+
+    assert.equal(result.code, exitCode, result.stderr);
+    assert.equal(result.stdout, "");
+    const envelope = JSON.parse(result.stderr);
+    assert.equal(envelope.error.reason, reason);
+    assert.equal(envelope.error.retryable, retryable);
+    assert.equal(envelope.error.request_id, "99999999-9999-4999-8999-999999999999");
+    assert.doesNotMatch(result.stderr, /private-model|secret prompt|filename\.png/);
+  }
+});
+
 test("a rejected request exits 4 and is not described as retryable", async () => {
   const api = await listen(fakeApi({ status: 422, detail: "invalid input asset" }));
   const result = await runCli(["generate", "a cat", "--quiet"], { DREAMLAYER_API_URL: api.url });
@@ -439,7 +544,46 @@ test("an error in the {error:{message}} shape surfaces the reason, not a bare st
   api.close();
 
   assert.equal(result.code, 4);
-  assert.match(result.stderr, /Request body failed validation/);
+  assert.match(result.stderr, /request could not be validated/i);
+  assert.match(result.stderr, /Reason: invalid_request/);
+});
+
+test("a terminal failure is read from canonical state and uses the same safe taxonomy", async () => {
+  const api = await listen(
+    fakeApi({
+      events: [started, { event: "done", data: { status: "failed" } }],
+      execution: {
+        execution_id: started.data.execution_id,
+        conversation_id: started.data.conversation_id,
+        status: "failed",
+        image_job: {
+          sanitized_error: {
+            code: "generation_failed",
+            reason: "temporarily_unavailable",
+            message: "private-model raw response and secret prompt",
+            retryable: true,
+            request_id: "88888888-8888-4888-8888-888888888888",
+          },
+        },
+      },
+    }),
+  );
+  const result = await runCli(["generate", "secret prompt", "--json", "--quiet"], {
+    DREAMLAYER_API_URL: api.url,
+  });
+  const canonicalRead = api.calls.some(
+    (call) => call.url === `/v1/executions/${started.data.execution_id}`,
+  );
+  api.close();
+
+  assert.equal(result.code, 5, result.stderr);
+  assert.equal(result.stdout, "");
+  const envelope = JSON.parse(result.stderr);
+  assert.equal(envelope.error.reason, "temporarily_unavailable");
+  assert.equal(envelope.error.retryable, true);
+  assert.equal(envelope.error.request_id, "88888888-8888-4888-8888-888888888888");
+  assert.equal(canonicalRead, true);
+  assert.doesNotMatch(result.stderr, /private-model|raw response|secret prompt/);
 });
 
 test("a bad file is rejected locally, before anything is uploaded or charged", async () => {
