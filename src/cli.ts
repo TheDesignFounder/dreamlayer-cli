@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { spriteCreditPrice } from "./client.js";
 /**
  * DreamLayer CLI.
  *
@@ -43,8 +44,7 @@ USAGE
   dreamlayer edit <image> <prompt> [--out <file>]
   dreamlayer cutout <image> [--out <file>]
   dreamlayer upscale <image> [--out <file>]
-  dreamlayer sprite <image> --action <walk|run|idle> --max-credits <n> [--out <zip>]
-  dreamlayer cancel <execution-id>
+  dreamlayer sprite <image> --action <walk|run|idle> [--frames <7–100>] --max-credits <n> [--out <zip>]
   dreamlayer answer <conversation-id> <text> [--image <file>] [--out <file>]
   dreamlayer status <execution-id>
   dreamlayer balance
@@ -55,6 +55,7 @@ OPTIONS
   --image <file>    Attach an image when answering a question that asks for one
   --aspect <ratio>  1:1, 16:9, 9:16, 4:3, 3:4. Default 1:1
   --action <name>  Sprite animation: walk, run, idle
+  --frames <n>      Frame count: integer 7–100, default 12
   --max-credits <n> Maximum approved charge for the sprite job
   --json            Machine-readable output on stdout
   --quiet           No progress on stderr
@@ -70,6 +71,7 @@ Image operations cost one credit. Sprite pricing is listed in capabilities. A ne
 type Options = {
   action: "walk" | "run" | "idle";
   maxCredits: number;
+  frameCount: number;
   out: string | null;
   image: string | null;
   aspect: string;
@@ -85,6 +87,7 @@ function parseOptions(argv: string[]): { positional: string[]; options: Options 
   const options: Options = {
     action: "walk",
     maxCredits: 1,
+    frameCount: 12,
     out: null,
     image: null,
     aspect: "1:1",
@@ -104,9 +107,13 @@ function parseOptions(argv: string[]): { positional: string[]; options: Options 
       const value = argv[++i];
       if (value !== "walk" && value !== "run" && value !== "idle") throw new UsageError("--action must be walk, run, or idle");
       options.action = value;
+    } else if (token === "--frames") {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value < 7 || value > 100) throw new UsageError("--frames must be an integer from 7 to 100");
+      options.frameCount = value;
     } else if (token === "--max-credits") {
       const value = Number(argv[++i]);
-      if (!Number.isInteger(value) || value < 1 || value > 100) throw new UsageError("--max-credits must be 1 to 100");
+      if (!Number.isFinite(value) || value < 0.1 || value > 100) throw new UsageError("--max-credits must be 0.1 to 100");
       options.maxCredits = value;
     } else if (token === "--image") {
       const value = argv[++i];
@@ -315,14 +322,10 @@ async function main(argv: string[]): Promise<number> {
       const api = client();
       const caps = await api.getCapabilities();
       if (!Array.isArray(caps.operations) || !caps.operations.includes("sprite_sheet")) throw new UsageError("sprite beta access is not enabled for this account");
-      const price = Number(caps.sprite_sheet_credits);
-      if (!Number.isInteger(price) || options.maxCredits < price) throw new UsageError(`Sprite jobs require ${price} credits. Set --max-credits to approve that amount.`);
-      return run(api, { operation: "sprite_sheet", input_asset_id: await upload(api, file), options: { action: options.action }, max_credits: options.maxCredits }, options);
-    }
-    case "cancel": {
-      if (!positional[0]) throw new UsageError("cancel needs an execution id");
-      process.stdout.write(`${JSON.stringify(await client().cancel(positional[0]), null, 2)}\n`);
-      return 0;
+      if (!caps.sprite_pricing) throw new UsageError("The server does not support configurable sprite pricing yet");
+      const price = spriteCreditPrice(options.frameCount);
+      if (options.maxCredits < price) throw new UsageError(`Sprite jobs require ${price} credits. Set --max-credits to approve that amount.`);
+      return run(api, { operation: "sprite_sheet", input_asset_id: await upload(api, file), options: { action: options.action, frame_count: options.frameCount }, max_credits: options.maxCredits }, options);
     }
     case "generate": {
       const prompt = positional[0];

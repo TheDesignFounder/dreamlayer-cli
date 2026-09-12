@@ -49,3 +49,11 @@ test('six minute sprite execution reconnects twice and keeps one charge', async(
   assert.equal(events.at(-1).data.status,'completed');assert.equal(submitted,1);assert.equal(resumed,2);assert.equal(elapsed,360_000);
  }finally{Date.now=realNow;server.closeAllConnections();await new Promise(r=>server.close(r));}
 });
+
+test('fractional balance permits conservative display without increasing credits',async()=>{
+ const {managedBalance,spriteCreditPrice}=await import('../dist/client.js');
+ assert.equal(managedBalance({promotional:0.7,purchased:10,available:10.8,credit_usd:'0.17'}).available,10.8);
+ assert.throws(()=>managedBalance({promotional:0.7,purchased:10,available:10.9,credit_usd:'0.17'}));
+ assert.throws(()=>managedBalance({promotional:0.78,purchased:10,available:10.78,credit_usd:'0.17'}));
+ assert.equal(spriteCreditPrice(7),5.8);assert.equal(spriteCreditPrice(14),11.6);assert.equal(spriteCreditPrice(15),12);assert.equal(spriteCreditPrice(100),47);
+});

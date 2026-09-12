@@ -140,6 +140,8 @@ function fakeApi(behaviour) {
           "input_asset_id",
           "aspect_ratio",
           "operation",
+          "options",
+          "max_credits",
         ];
         const extra = Object.keys(body).filter((key) => !allowed.includes(key));
         if (extra.length > 0) {
@@ -926,3 +928,23 @@ test("capabilities stays quiet when the lists agree", async () => {
   assert.equal(result.code, 0);
   assert.doesNotMatch(result.stderr, /disagree/, "no warning when there is nothing to warn about");
 });
+
+for (const [count, credits] of [[7,5.8],[14,11.6],[15,12],[99,46.6],[100,47]]) {
+ test(`sprite CLI passes ${count} frames and its fractional approved limit`, async()=>{
+  const api=await listen(fakeApi({capabilities:{api_version:'1',operations:['sprite_sheet'],sprite_pricing:{minimum_frames:7,maximum_frames:100}},events:[started,{event:'asset',data:{asset_id:'44444444-4444-4444-8444-444444444444',download_url:'ASSET'}},{event:'done',data:{status:'completed'}}]}));
+  const dir=await mkdtemp(path.join(tmpdir(),'sprite-count-'));
+  const input=path.join(dir,'reference.png');await writeFile(input,PNG);
+  try {
+   const result=await runCli(['sprite',input,'--frames',String(count),'--max-credits',String(credits),'--out',path.join(dir,'sheet.zip'),'--quiet'],{DREAMLAYER_API_URL:api.url});
+   assert.equal(result.code,0,result.stderr);
+   const body=api.calls.find(c=>c.url==='/v1/execute').body;
+   assert.equal(body.options.frame_count,count);assert.equal(body.max_credits,credits);
+  } finally {api.close();}
+ });
+}
+for (const count of [6,101,7.5]) {
+ test(`sprite CLI rejects ${count} frames before a network call`,async()=>{
+  const api=await listen(fakeApi({events:[]}));
+  try {const result=await runCli(['sprite','missing.png','--frames',String(count),'--max-credits','100'],{DREAMLAYER_API_URL:api.url});assert.notEqual(result.code,0);assert.match(result.stderr,/7 to 100/);assert.equal(api.calls.length,0);}finally{api.close();}
+ });
+}

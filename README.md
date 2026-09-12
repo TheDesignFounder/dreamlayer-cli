@@ -110,12 +110,11 @@ MIT. See LICENSE and NOTICE.
 
 ## Sprite-sheet beta
 
-Eligible accounts can create walk, run, or idle sprite bundles. Check `sprite_sheet` in capabilities and the returned `sprite_sheet_credits` price before starting. A bundle includes twelve transparent frame PNGs, a 2048 by 1536 sheet, atlas, preview, and import instructions. Jobs may take several minutes. Keep the execution ID to resume status or cancel.
+Eligible accounts can create walk, run, or idle sprite bundles. Request an integer `frame_count` from 7 to 100 (default 12). Frames 1–14 cost $0.14 each; additional frames cost $0.07 each. One credit is $0.17. The total request charge rounds up to one decimal credit; displayed balances round down without changing stored funds. Check `sprite_pricing` in capabilities and approve the total with `max_credits`. A bundle includes transparent frames, sheet, atlas, preview, and import instructions. Large requests may contain a sequence rather than one seamless loop; the atlas identifies the sampling mode. Insufficient distinct frames fail without padding or interpolation. Jobs may take several minutes. Hold credits at admission, charge after complete delivery, and restore the hold if generation fails or times out. Sprite requests have no customer cancellation. Keep the execution ID to resume status.
 
 ```sh
-dreamlayer sprite character.png --action walk --max-credits 20 --out walk.zip
+dreamlayer sprite character.png --action walk --frames 12 --max-credits 9.9 --out walk.zip
 dreamlayer status EXECUTION_ID
-dreamlayer cancel EXECUTION_ID
 ```
 
 Set `--max-credits` to the amount you approve after checking the current price. The CLI reconnects to existing work if an event stream closes.
