@@ -49,6 +49,7 @@ export const KNOWN_OPERATIONS = [
   "image_to_image",
   "background_remove",
   "upscale",
+  "sprite_sheet",
 ] as const;
 
 /**
@@ -70,6 +71,8 @@ export type ManagedExecuteInput = {
   aspect_ratio?: string;
   /** Requires the gateway build that added it. See ManagedOperation. */
   operation?: ManagedOperation;
+  options?: { action: "walk" | "run" | "idle" };
+  max_credits?: number;
 };
 
 export type ManagedInputAsset = {
@@ -653,6 +656,43 @@ export class ManagedClient {
       body: JSON.stringify(input),
     });
     yield* this.parse(stream);
+  }
+
+  /** Follow a durable job across finite streams without submitting it twice. */
+  async *follow(input: ManagedExecuteInput, options: { idempotencyKey: string }): AsyncGenerator<ManagedEvent> {
+    let executionId: string | undefined;
+    let cursor: string | undefined;
+    let stream = this.execute(input, options);
+    const deadline = Date.now() + 16 * 60_000;
+    let failures = 0;
+    while (Date.now() < deadline) {
+      try {
+        for await (const event of stream) {
+          if (event.event === "started") executionId = String(event.data.execution_id);
+          if (event.id) cursor = event.id;
+          yield event;
+          if (event.event === "done") return;
+        }
+        failures = 0;
+      } catch (error) {
+        if (error instanceof StreamIdleError) throw error;
+        if (!executionId || (error instanceof ApiError && ![429, 500, 502, 503, 504].includes(error.status)) || ++failures > 5) throw error;
+      }
+      if (!executionId) throw new Error("Execution stream ended before an identifier was received; reuse your idempotency key.");
+      const state = await this.getExecution(executionId);
+      if (["completed", "failed", "cancelled"].includes(state.status)) {
+        if (state.status === "completed") {
+          const assets = state.image_job?.finished_assets;
+          if (!Array.isArray(assets) || assets.length !== 1 || typeof assets[0]?.download_url !== "string") throw new Error(`Execution ${executionId} has no downloadable asset yet.`);
+          yield managedEvent("asset", null, { asset_id: assets[0].asset_id, download_url: assets[0].download_url });
+        }
+        yield managedEvent("done", null, {status: state.status});
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(5000, 500 * 2 ** failures)));
+      stream = this.events(executionId, cursor);
+    }
+    throw new Error(`Execution ${executionId ?? "unknown"} is still active. Use status to resume; the job has not been cancelled.`);
   }
 
   /** Resume a stream after a drop. Pass the last event id you actually processed. */

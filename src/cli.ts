@@ -43,6 +43,8 @@ USAGE
   dreamlayer edit <image> <prompt> [--out <file>]
   dreamlayer cutout <image> [--out <file>]
   dreamlayer upscale <image> [--out <file>]
+  dreamlayer sprite <image> --action <walk|run|idle> --max-credits <n> [--out <zip>]
+  dreamlayer cancel <execution-id>
   dreamlayer answer <conversation-id> <text> [--image <file>] [--out <file>]
   dreamlayer status <execution-id>
   dreamlayer balance
@@ -52,6 +54,8 @@ OPTIONS
   --out <file>      Where to write the image. Default: dreamlayer-<n>.png
   --image <file>    Attach an image when answering a question that asks for one
   --aspect <ratio>  1:1, 16:9, 9:16, 4:3, 3:4. Default 1:1
+  --action <name>  Sprite animation: walk, run, idle
+  --max-credits <n> Maximum approved charge for the sprite job
   --json            Machine-readable output on stdout
   --quiet           No progress on stderr
   --idempotency-key <key>  Reuse to retry safely after an uncertain response
@@ -60,10 +64,12 @@ ENVIRONMENT
   DREAMLAYER_API_KEY   Required. Get one at https://platform.dreamlayer.io
   DREAMLAYER_API_URL   Override the endpoint. Default https://api.dreamlayer.io
 
-Every finished image costs one credit. A new account starts at zero.
+Image operations cost one credit. Sprite pricing is listed in capabilities. A new account starts at zero.
 `;
 
 type Options = {
+  action: "walk" | "run" | "idle";
+  maxCredits: number;
   out: string | null;
   image: string | null;
   aspect: string;
@@ -77,6 +83,8 @@ class UsageError extends Error {}
 function parseOptions(argv: string[]): { positional: string[]; options: Options } {
   const positional: string[] = [];
   const options: Options = {
+    action: "walk",
+    maxCredits: 1,
     out: null,
     image: null,
     aspect: "1:1",
@@ -92,6 +100,14 @@ function parseOptions(argv: string[]): { positional: string[]; options: Options 
       const value = argv[++i];
       if (!value) throw new UsageError("--out needs a file path");
       options.out = value;
+    } else if (token === "--action") {
+      const value = argv[++i];
+      if (value !== "walk" && value !== "run" && value !== "idle") throw new UsageError("--action must be walk, run, or idle");
+      options.action = value;
+    } else if (token === "--max-credits") {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value < 1 || value > 100) throw new UsageError("--max-credits must be 1 to 100");
+      options.maxCredits = value;
     } else if (token === "--image") {
       const value = argv[++i];
       if (!value) throw new UsageError("--image needs a file path");
@@ -156,7 +172,7 @@ async function run(
 ): Promise<number> {
   const progress = new Progress(!options.quiet && process.stderr.isTTY === true);
   const idempotencyKey = options.idempotencyKey ?? randomUUID();
-  const outcome = await consume(api.execute(input, { idempotencyKey }), progress);
+  const outcome = await consume(api.follow(input, { idempotencyKey }), progress);
 
   if (outcome.question) {
     progress.stop();
@@ -188,7 +204,7 @@ async function run(
 
   progress.set("Downloading");
   const bytes = await api.download(outcome.asset.download_url);
-  const target = options.out ?? defaultOut();
+  const target = options.out ?? (input.operation === "sprite_sheet" ? `dreamlayer-${Date.now()}.zip` : defaultOut());
   await writeFile(target, bytes);
   progress.stop();
 
@@ -255,7 +271,7 @@ function warnIfOperationsDrifted(capabilities: unknown): void {
   const server = new Set(listed as string[]);
   const mine = new Set<string>(KNOWN_OPERATIONS);
   const serverOnly = [...server].filter((o) => !mine.has(o));
-  const clientOnly = [...mine].filter((o) => !server.has(o));
+  const clientOnly = [...mine].filter((o) => !server.has(o) && o !== "sprite_sheet");
   if (serverOnly.length === 0 && clientOnly.length === 0) return;
 
   process.stderr.write("\nThis CLI and the server disagree about the operation list.\n");
@@ -293,6 +309,21 @@ async function main(argv: string[]): Promise<number> {
   const { positional, options } = parseOptions(rest);
 
   switch (command) {
+    case "sprite": {
+      const file = positional[0];
+      if (!file) throw new UsageError("sprite needs a reference image");
+      const api = client();
+      const caps = await api.getCapabilities();
+      if (!Array.isArray(caps.operations) || !caps.operations.includes("sprite_sheet")) throw new UsageError("sprite beta access is not enabled for this account");
+      const price = Number(caps.sprite_sheet_credits);
+      if (!Number.isInteger(price) || options.maxCredits < price) throw new UsageError(`Sprite jobs require ${price} credits. Set --max-credits to approve that amount.`);
+      return run(api, { operation: "sprite_sheet", input_asset_id: await upload(api, file), options: { action: options.action }, max_credits: options.maxCredits }, options);
+    }
+    case "cancel": {
+      if (!positional[0]) throw new UsageError("cancel needs an execution id");
+      process.stdout.write(`${JSON.stringify(await client().cancel(positional[0]), null, 2)}\n`);
+      return 0;
+    }
     case "generate": {
       const prompt = positional[0];
       if (!prompt) throw new UsageError("generate needs a prompt");

@@ -107,3 +107,15 @@ Node.js 22.12 or later.
 ## License
 
 MIT. See LICENSE and NOTICE.
+
+## Sprite-sheet beta
+
+Eligible accounts can create walk, run, or idle sprite bundles. Check `sprite_sheet` in capabilities and the returned `sprite_sheet_credits` price before starting. A bundle includes twelve transparent frame PNGs, a 2048 by 1536 sheet, atlas, preview, and import instructions. Jobs may take several minutes. Keep the execution ID to resume status or cancel.
+
+```sh
+dreamlayer sprite character.png --action walk --max-credits 20 --out walk.zip
+dreamlayer status EXECUTION_ID
+dreamlayer cancel EXECUTION_ID
+```
+
+Set `--max-credits` to the amount you approve after checking the current price. The CLI reconnects to existing work if an event stream closes.
