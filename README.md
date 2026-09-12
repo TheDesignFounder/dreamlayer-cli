@@ -118,3 +118,5 @@ dreamlayer status EXECUTION_ID
 ```
 
 Set `--max-credits` to the amount you approve after checking the current price. The CLI reconnects to existing work if an event stream closes.
+
+For affordability, compare the complete rounded quote in **credits** with `available`. One tenth of a credit is $0.017. Promotional and purchased amounts are displayed rounded down separately, so their displayed sum can be 0.1 credit below `available`; stored fractions are preserved. Compare against the combined total, not that sum. The order charge rounds only once, never per frame or per tier.

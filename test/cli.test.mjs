@@ -948,3 +948,18 @@ for (const count of [6,101,7.5]) {
   try {const result=await runCli(['sprite','missing.png','--frames',String(count),'--max-credits','100'],{DREAMLAYER_API_URL:api.url});assert.notEqual(result.code,0);assert.match(result.stderr,/7 to 100/);assert.equal(api.calls.length,0);}finally{api.close();}
  });
 }
+
+
+test("fractional funding explains affordability without changing JSON balances", async () => {
+  const body = { promotional: 0, purchased: 5.7, available: 5.8, credit_usd: "0.17" };
+  const api = await listen(fakeApi({ events: [], balanceBody: body }));
+  try {
+    const human = await runCli(["balance"], { DREAMLAYER_API_URL: api.url });
+    assert.equal(human.code, 0, human.stderr);
+    assert.match(human.stdout, /5.8 credits available/);
+    assert.match(human.stdout, /Use the available total for affordability/);
+    const json = await runCli(["balance", "--json"], { DREAMLAYER_API_URL: api.url });
+    assert.equal(json.code, 0, json.stderr);
+    assert.deepEqual(JSON.parse(json.stdout), body);
+  } finally { api.close(); }
+});

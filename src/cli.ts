@@ -388,6 +388,9 @@ async function main(argv: string[]): Promise<number> {
             `(${balance.promotional} promotional, ${balance.purchased} purchased)\n`,
         );
       }
+      if (!options.json && Math.round(balance.available * 10) > Math.round(balance.promotional * 10) + Math.round(balance.purchased * 10)) {
+        process.stdout.write("Use the available total for affordability. Funding balances are rounded down separately; stored fractions are preserved.\n");
+      }
       return 0;
     }
     case "capabilities": {
