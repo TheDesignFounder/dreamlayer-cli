@@ -54,7 +54,10 @@ OPTIONS
   --out <file>      Where to write the image. Default: dreamlayer-<n>.png
   --image <file>    Attach an image when answering a question that asks for one
   --aspect <ratio>  1:1, 16:9, 9:16, 4:3, 3:4. Default 1:1
-  --action <name>  Sprite animation: walk, run, idle
+  --action <name>  Sprite preset: walk, run, idle (walk if no custom prompt)
+  --animation-prompt <text>  Custom animation; cannot combine with --action
+  --animation-mode <loop|once>  Default: loop for presets, once for custom
+  --frame-size <px> Square export: 32, 64, 128, 256, 512 (default), 720, 1080
   --frames <n>      Frame count: integer 7–100, default 12
   --max-credits <n> Maximum approved charge for the sprite job
   --json            Machine-readable output on stdout
@@ -69,7 +72,10 @@ Image operations cost one credit. Sprite pricing is listed in capabilities. A ne
 `;
 
 type Options = {
-  action: "walk" | "run" | "idle";
+  action?: "walk" | "run" | "idle";
+  animationPrompt?: string;
+  animationMode?: "loop" | "once";
+  frameSize?: 32 | 64 | 128 | 256 | 512 | 720 | 1080;
   maxCredits: number;
   frameCount: number;
   out: string | null;
@@ -85,7 +91,6 @@ class UsageError extends Error {}
 function parseOptions(argv: string[]): { positional: string[]; options: Options } {
   const positional: string[] = [];
   const options: Options = {
-    action: "walk",
     maxCredits: 1,
     frameCount: 12,
     out: null,
@@ -107,6 +112,18 @@ function parseOptions(argv: string[]): { positional: string[]; options: Options 
       const value = argv[++i];
       if (value !== "walk" && value !== "run" && value !== "idle") throw new UsageError("--action must be walk, run, or idle");
       options.action = value;
+    } else if (token === "--animation-prompt") {
+      const value = argv[++i];
+      if (!value?.trim() || [...value].length > 4000) throw new UsageError("--animation-prompt needs 1–4000 characters");
+      options.animationPrompt = value;
+    } else if (token === "--animation-mode") {
+      const value = argv[++i];
+      if (value !== "loop" && value !== "once") throw new UsageError("--animation-mode must be loop or once");
+      options.animationMode = value;
+    } else if (token === "--frame-size") {
+      const value = Number(argv[++i]);
+      if (![32, 64, 128, 256, 512, 720, 1080].includes(value)) throw new UsageError("--frame-size must be 32, 64, 128, 256, 512, 720 or 1080");
+      options.frameSize = value as Options["frameSize"];
     } else if (token === "--frames") {
       const value = Number(argv[++i]);
       if (!Number.isInteger(value) || value < 7 || value > 100) throw new UsageError("--frames must be an integer from 7 to 100");
@@ -317,6 +334,7 @@ async function main(argv: string[]): Promise<number> {
 
   switch (command) {
     case "sprite": {
+      if (options.action && options.animationPrompt) throw new UsageError("Use either --action or --animation-prompt, not both");
       const file = positional[0];
       if (!file) throw new UsageError("sprite needs a reference image");
       const api = client();
@@ -325,7 +343,7 @@ async function main(argv: string[]): Promise<number> {
       if (!caps.sprite_pricing) throw new UsageError("The server does not support configurable sprite pricing yet");
       const price = spriteCreditPrice(options.frameCount);
       if (options.maxCredits < price) throw new UsageError(`Sprite jobs require ${price} credits. Set --max-credits to approve that amount.`);
-      return run(api, { operation: "sprite_sheet", input_asset_id: await upload(api, file), options: { action: options.action, frame_count: options.frameCount }, max_credits: options.maxCredits }, options);
+      return run(api, { operation: "sprite_sheet", input_asset_id: await upload(api, file), options: { ...(options.animationPrompt ? { animation_prompt: options.animationPrompt } : { action: options.action ?? "walk" }), ...(options.animationMode ? { animation_mode: options.animationMode } : {}), ...(options.frameSize ? { frame_size: options.frameSize } : {}), frame_count: options.frameCount }, max_credits: options.maxCredits }, options);
     }
     case "generate": {
       const prompt = positional[0];
