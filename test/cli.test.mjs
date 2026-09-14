@@ -942,6 +942,24 @@ for (const [count, credits] of [[7,5.8],[14,11.6],[15,12],[99,46.6],[100,47]]) {
   } finally {api.close();}
  });
 }
+for (const size of [32,64,128,256,512,720,1080]) {
+ test(`custom sprite CLI forwards prompt, mode and ${size}px export`, async()=>{
+  const api=await listen(fakeApi({capabilities:{api_version:'1',operations:['sprite_sheet'],sprite_pricing:{minimum_frames:7,maximum_frames:100}},events:[started,{event:'asset',data:{asset_id:'44444444-4444-4444-8444-444444444444',download_url:'ASSET'}},{event:'done',data:{status:'completed'}}]}));
+  const dir=await mkdtemp(path.join(tmpdir(),'sprite-custom-'));
+  const input=path.join(dir,'reference.png');await writeFile(input,PNG);
+  try {
+   const result=await runCli(['sprite',input,'--animation-prompt','Rotate this character 360 degrees','--animation-mode','loop','--frame-size',String(size),'--frames','7','--max-credits','5.8','--out',path.join(dir,'sheet.zip'),'--quiet'],{DREAMLAYER_API_URL:api.url});
+   assert.equal(result.code,0,result.stderr);
+   assert.deepEqual(api.calls.find(c=>c.url==='/v1/execute').body.options,{animation_prompt:'Rotate this character 360 degrees',animation_mode:'loop',frame_size:size,frame_count:7});
+  } finally {api.close();}
+ });
+}
+for (const args of [['--action','walk','--animation-prompt','spin'],['--frame-size','33'],['--animation-prompt',' '],['--animation-mode','maybe']]) {
+ test(`invalid sprite options rejected before upload: ${args}`,async()=>{
+  const api=await listen(fakeApi({events:[]}));
+  try {const result=await runCli(['sprite','missing.png',...args,'--max-credits','100'],{DREAMLAYER_API_URL:api.url});assert.notEqual(result.code,0);assert.equal(api.calls.length,0);}finally{api.close();}
+ });
+}
 for (const count of [6,101,7.5]) {
  test(`sprite CLI rejects ${count} frames before a network call`,async()=>{
   const api=await listen(fakeApi({events:[]}));
