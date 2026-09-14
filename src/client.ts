@@ -49,6 +49,7 @@ export const KNOWN_OPERATIONS = [
   "image_to_image",
   "background_remove",
   "upscale",
+  "sprite_sheet",
 ] as const;
 
 /**
@@ -70,7 +71,27 @@ export type ManagedExecuteInput = {
   aspect_ratio?: string;
   /** Requires the gateway build that added it. See ManagedOperation. */
   operation?: ManagedOperation;
+  options?: { action?: "walk" | "run" | "idle"; animation_prompt?: string; animation_mode?: "loop" | "once"; frame_count?: number; frame_size?: 32 | 64 | 128 | 256 | 512 | 720 | 1080 };
+  max_credits?: number;
 };
+
+export function spriteCreditPrice(frameCount: number): number {
+  if (!Number.isInteger(frameCount) || frameCount < 7 || frameCount > 100) throw new Error("frame_count must be an integer from 7 to 100");
+  const cents = 14 * Math.min(frameCount, 14) + 7 * Math.max(frameCount - 14, 0);
+  return Math.ceil(cents * 10 / 17) / 10;
+}
+
+export function validateSpriteInput(input: ManagedExecuteInput): void {
+  if (input.operation !== "sprite_sheet") return;
+  const options = input.options;
+  if (!options || (options.action === undefined) === (options.animation_prompt === undefined)) throw new Error("Sprite requests require exactly one of options.action or options.animation_prompt");
+  if (options.action !== undefined && !["walk", "run", "idle"].includes(options.action)) throw new Error("Invalid sprite preset");
+  if (options.animation_prompt !== undefined && (typeof options.animation_prompt !== "string" || !options.animation_prompt.trim() || [...options.animation_prompt].length > 4000)) throw new Error("animation_prompt must contain 1–4000 characters");
+  if (options.animation_mode !== undefined && !["loop", "once"].includes(options.animation_mode)) throw new Error("animation_mode must be loop or once");
+  const price = spriteCreditPrice(options.frame_count ?? 12);
+  if (options.frame_size !== undefined && ![32, 64, 128, 256, 512, 720, 1080].includes(options.frame_size)) throw new Error("frame_size must be 32, 64, 128, 256, 512, 720 or 1080");
+  if (typeof input.max_credits !== "number" || !Number.isFinite(input.max_credits) || input.max_credits < price || input.max_credits > 100) throw new Error(`This sprite request requires ${price} credits. Supply a sufficient max_credits limit.`);
+}
 
 export type ManagedInputAsset = {
   input_asset_id: string;
@@ -117,6 +138,7 @@ export const PUBLIC_ERROR_REASONS = [
   "content_refused",
   "temporarily_unavailable",
   "generation_failed",
+  "insufficient_frames",
 ] as const;
 
 export type PublicErrorReason = (typeof PUBLIC_ERROR_REASONS)[number];
@@ -151,6 +173,7 @@ const PUBLIC_ERROR_SPECS: Record<
     message: "The service is temporarily unavailable. Please try again.",
     retryable: true,
   },
+  insufficient_frames: { message: "Not enough distinct animation frames. Try a lower frame count.", retryable: false },
   generation_failed: { message: "Image generation failed.", retryable: false },
 };
 
@@ -188,6 +211,7 @@ function defaultCode(reason: PublicErrorReason): string {
     content_refused: "CONTENT_REFUSED",
     temporarily_unavailable: "SERVICE_UNAVAILABLE",
     generation_failed: "INTERNAL_ERROR",
+    insufficient_frames: "INSUFFICIENT_FRAMES",
   };
   return codes[reason];
 }
@@ -206,6 +230,7 @@ function statusForReason(reason: PublicErrorReason): number {
     content_refused: 422,
     temporarily_unavailable: 503,
     generation_failed: 500,
+    insufficient_frames: 422,
   };
   return statuses[reason];
 }
@@ -414,16 +439,18 @@ export function managedBalance(value: unknown): ManagedBalance {
     throw new Error("Invalid DreamLayer balance response");
   }
   for (const field of ["promotional", "purchased", "available"] as const) {
-    if (!Number.isSafeInteger(value[field]) || Number(value[field]) < 0) {
+    if (typeof value[field] !== "number" || !Number.isFinite(value[field]) || Number(value[field]) < 0 || Number(value[field]) > Number.MAX_SAFE_INTEGER / 10) {
       throw new Error("Invalid DreamLayer balance response");
     }
   }
   if (
     value.credit_usd !== "0.17" ||
-    Number(value.available) !== Number(value.promotional) + Number(value.purchased)
+    Math.round(Number(value.available) * 10) < Math.round(Number(value.promotional) * 10) + Math.round(Number(value.purchased) * 10) ||
+    Math.round(Number(value.available) * 10) > Math.round(Number(value.promotional) * 10) + Math.round(Number(value.purchased) * 10) + 1
   ) {
     throw new Error("Invalid DreamLayer balance response");
   }
+  if ([value.promotional, value.purchased, value.available].some(v => Math.abs(Number(v) * 10 - Math.round(Number(v) * 10)) > 1e-7)) throw new Error("Invalid DreamLayer balance response");
   return {
     promotional: Number(value.promotional),
     purchased: Number(value.purchased),
@@ -643,6 +670,7 @@ export class ManagedClient {
     input: ManagedExecuteInput,
     options: { idempotencyKey: string },
   ): AsyncGenerator<ManagedEvent> {
+    validateSpriteInput(input);
     const stream = await this.fetchStream("/v1/execute", {
       method: "POST",
       headers: {
@@ -653,6 +681,43 @@ export class ManagedClient {
       body: JSON.stringify(input),
     });
     yield* this.parse(stream);
+  }
+
+  /** Follow a durable job across finite streams without submitting it twice. */
+  async *follow(input: ManagedExecuteInput, options: { idempotencyKey: string }): AsyncGenerator<ManagedEvent> {
+    let executionId: string | undefined;
+    let cursor: string | undefined;
+    let stream = this.execute(input, options);
+    const deadline = Date.now() + 16 * 60_000;
+    let failures = 0;
+    while (Date.now() < deadline) {
+      try {
+        for await (const event of stream) {
+          if (event.event === "started") executionId = String(event.data.execution_id);
+          if (event.id) cursor = event.id;
+          yield event;
+          if (event.event === "done") return;
+        }
+        failures = 0;
+      } catch (error) {
+        if (error instanceof StreamIdleError) throw error;
+        if (!executionId || (error instanceof ApiError && ![429, 500, 502, 503, 504].includes(error.status)) || ++failures > 5) throw error;
+      }
+      if (!executionId) throw new Error("Execution stream ended before an identifier was received; reuse your idempotency key.");
+      const state = await this.getExecution(executionId);
+      if (["completed", "failed", "cancelled"].includes(state.status)) {
+        if (state.status === "completed") {
+          const assets = state.image_job?.finished_assets;
+          if (!Array.isArray(assets) || assets.length !== 1 || typeof assets[0]?.download_url !== "string") throw new Error(`Execution ${executionId} has no downloadable asset yet.`);
+          yield managedEvent("asset", null, { asset_id: assets[0].asset_id, download_url: assets[0].download_url });
+        }
+        yield managedEvent("done", null, {status: state.status});
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(5000, 500 * 2 ** failures)));
+      stream = this.events(executionId, cursor);
+    }
+    throw new Error(`Execution ${executionId ?? "unknown"} is still active. Use status to resume; the job has not been cancelled.`);
   }
 
   /** Resume a stream after a drop. Pass the last event id you actually processed. */

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { spriteCreditPrice } from "./client.js";
 /**
  * DreamLayer CLI.
  *
@@ -43,6 +44,7 @@ USAGE
   dreamlayer edit <image> <prompt> [--out <file>]
   dreamlayer cutout <image> [--out <file>]
   dreamlayer upscale <image> [--out <file>]
+  dreamlayer sprite <image> --action <walk|run|idle> [--frames <7–100>] --max-credits <n> [--out <zip>]
   dreamlayer answer <conversation-id> <text> [--image <file>] [--out <file>]
   dreamlayer status <execution-id>
   dreamlayer balance
@@ -52,6 +54,12 @@ OPTIONS
   --out <file>      Where to write the image. Default: dreamlayer-<n>.png
   --image <file>    Attach an image when answering a question that asks for one
   --aspect <ratio>  1:1, 16:9, 9:16, 4:3, 3:4. Default 1:1
+  --action <name>  Sprite preset: walk, run, idle (walk if no custom prompt)
+  --animation-prompt <text>  Custom animation; cannot combine with --action
+  --animation-mode <loop|once>  Default: loop for presets, once for custom
+  --frame-size <px> Square export: 32, 64, 128, 256, 512 (default), 720, 1080
+  --frames <n>      Frame count: integer 7–100, default 12
+  --max-credits <n> Maximum approved charge for the sprite job
   --json            Machine-readable output on stdout
   --quiet           No progress on stderr
   --idempotency-key <key>  Reuse to retry safely after an uncertain response
@@ -60,10 +68,16 @@ ENVIRONMENT
   DREAMLAYER_API_KEY   Required. Get one at https://platform.dreamlayer.io
   DREAMLAYER_API_URL   Override the endpoint. Default https://api.dreamlayer.io
 
-Every finished image costs one credit. A new account starts at zero.
+Image operations cost one credit. Sprite pricing is listed in capabilities. A new account starts at zero.
 `;
 
 type Options = {
+  action?: "walk" | "run" | "idle";
+  animationPrompt?: string;
+  animationMode?: "loop" | "once";
+  frameSize?: 32 | 64 | 128 | 256 | 512 | 720 | 1080;
+  maxCredits: number;
+  frameCount: number;
   out: string | null;
   image: string | null;
   aspect: string;
@@ -77,6 +91,8 @@ class UsageError extends Error {}
 function parseOptions(argv: string[]): { positional: string[]; options: Options } {
   const positional: string[] = [];
   const options: Options = {
+    maxCredits: 1,
+    frameCount: 12,
     out: null,
     image: null,
     aspect: "1:1",
@@ -92,6 +108,30 @@ function parseOptions(argv: string[]): { positional: string[]; options: Options 
       const value = argv[++i];
       if (!value) throw new UsageError("--out needs a file path");
       options.out = value;
+    } else if (token === "--action") {
+      const value = argv[++i];
+      if (value !== "walk" && value !== "run" && value !== "idle") throw new UsageError("--action must be walk, run, or idle");
+      options.action = value;
+    } else if (token === "--animation-prompt") {
+      const value = argv[++i];
+      if (!value?.trim() || [...value].length > 4000) throw new UsageError("--animation-prompt needs 1–4000 characters");
+      options.animationPrompt = value;
+    } else if (token === "--animation-mode") {
+      const value = argv[++i];
+      if (value !== "loop" && value !== "once") throw new UsageError("--animation-mode must be loop or once");
+      options.animationMode = value;
+    } else if (token === "--frame-size") {
+      const value = Number(argv[++i]);
+      if (![32, 64, 128, 256, 512, 720, 1080].includes(value)) throw new UsageError("--frame-size must be 32, 64, 128, 256, 512, 720 or 1080");
+      options.frameSize = value as Options["frameSize"];
+    } else if (token === "--frames") {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value < 7 || value > 100) throw new UsageError("--frames must be an integer from 7 to 100");
+      options.frameCount = value;
+    } else if (token === "--max-credits") {
+      const value = Number(argv[++i]);
+      if (!Number.isFinite(value) || value < 0.1 || value > 100) throw new UsageError("--max-credits must be 0.1 to 100");
+      options.maxCredits = value;
     } else if (token === "--image") {
       const value = argv[++i];
       if (!value) throw new UsageError("--image needs a file path");
@@ -156,7 +196,7 @@ async function run(
 ): Promise<number> {
   const progress = new Progress(!options.quiet && process.stderr.isTTY === true);
   const idempotencyKey = options.idempotencyKey ?? randomUUID();
-  const outcome = await consume(api.execute(input, { idempotencyKey }), progress);
+  const outcome = await consume(api.follow(input, { idempotencyKey }), progress);
 
   if (outcome.question) {
     progress.stop();
@@ -188,7 +228,7 @@ async function run(
 
   progress.set("Downloading");
   const bytes = await api.download(outcome.asset.download_url);
-  const target = options.out ?? defaultOut();
+  const target = options.out ?? (input.operation === "sprite_sheet" ? `dreamlayer-${Date.now()}.zip` : defaultOut());
   await writeFile(target, bytes);
   progress.stop();
 
@@ -255,7 +295,7 @@ function warnIfOperationsDrifted(capabilities: unknown): void {
   const server = new Set(listed as string[]);
   const mine = new Set<string>(KNOWN_OPERATIONS);
   const serverOnly = [...server].filter((o) => !mine.has(o));
-  const clientOnly = [...mine].filter((o) => !server.has(o));
+  const clientOnly = [...mine].filter((o) => !server.has(o) && o !== "sprite_sheet");
   if (serverOnly.length === 0 && clientOnly.length === 0) return;
 
   process.stderr.write("\nThis CLI and the server disagree about the operation list.\n");
@@ -293,6 +333,18 @@ async function main(argv: string[]): Promise<number> {
   const { positional, options } = parseOptions(rest);
 
   switch (command) {
+    case "sprite": {
+      if (options.action && options.animationPrompt) throw new UsageError("Use either --action or --animation-prompt, not both");
+      const file = positional[0];
+      if (!file) throw new UsageError("sprite needs a reference image");
+      const api = client();
+      const caps = await api.getCapabilities();
+      if (!Array.isArray(caps.operations) || !caps.operations.includes("sprite_sheet")) throw new UsageError("sprite beta access is not enabled for this account");
+      if (!caps.sprite_pricing) throw new UsageError("The server does not support configurable sprite pricing yet");
+      const price = spriteCreditPrice(options.frameCount);
+      if (options.maxCredits < price) throw new UsageError(`Sprite jobs require ${price} credits. Set --max-credits to approve that amount.`);
+      return run(api, { operation: "sprite_sheet", input_asset_id: await upload(api, file), options: { ...(options.animationPrompt ? { animation_prompt: options.animationPrompt } : { action: options.action ?? "walk" }), ...(options.animationMode ? { animation_mode: options.animationMode } : {}), ...(options.frameSize ? { frame_size: options.frameSize } : {}), frame_count: options.frameCount }, max_credits: options.maxCredits }, options);
+    }
     case "generate": {
       const prompt = positional[0];
       if (!prompt) throw new UsageError("generate needs a prompt");
@@ -353,6 +405,9 @@ async function main(argv: string[]): Promise<number> {
           `${balance.available} credits available ` +
             `(${balance.promotional} promotional, ${balance.purchased} purchased)\n`,
         );
+      }
+      if (!options.json && Math.round(balance.available * 10) > Math.round(balance.promotional * 10) + Math.round(balance.purchased * 10)) {
+        process.stdout.write("Use the available total for affordability. Funding balances are rounded down separately; stored fractions are preserved.\n");
       }
       return 0;
     }

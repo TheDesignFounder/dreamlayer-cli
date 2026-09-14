@@ -140,6 +140,8 @@ function fakeApi(behaviour) {
           "input_asset_id",
           "aspect_ratio",
           "operation",
+          "options",
+          "max_credits",
         ];
         const extra = Object.keys(body).filter((key) => !allowed.includes(key));
         if (extra.length > 0) {
@@ -925,4 +927,57 @@ test("capabilities stays quiet when the lists agree", async () => {
 
   assert.equal(result.code, 0);
   assert.doesNotMatch(result.stderr, /disagree/, "no warning when there is nothing to warn about");
+});
+
+for (const [count, credits] of [[7,5.8],[14,11.6],[15,12],[99,46.6],[100,47]]) {
+ test(`sprite CLI passes ${count} frames and its fractional approved limit`, async()=>{
+  const api=await listen(fakeApi({capabilities:{api_version:'1',operations:['sprite_sheet'],sprite_pricing:{minimum_frames:7,maximum_frames:100}},events:[started,{event:'asset',data:{asset_id:'44444444-4444-4444-8444-444444444444',download_url:'ASSET'}},{event:'done',data:{status:'completed'}}]}));
+  const dir=await mkdtemp(path.join(tmpdir(),'sprite-count-'));
+  const input=path.join(dir,'reference.png');await writeFile(input,PNG);
+  try {
+   const result=await runCli(['sprite',input,'--frames',String(count),'--max-credits',String(credits),'--out',path.join(dir,'sheet.zip'),'--quiet'],{DREAMLAYER_API_URL:api.url});
+   assert.equal(result.code,0,result.stderr);
+   const body=api.calls.find(c=>c.url==='/v1/execute').body;
+   assert.equal(body.options.frame_count,count);assert.equal(body.max_credits,credits);
+  } finally {api.close();}
+ });
+}
+for (const size of [32,64,128,256,512,720,1080]) {
+ test(`custom sprite CLI forwards prompt, mode and ${size}px export`, async()=>{
+  const api=await listen(fakeApi({capabilities:{api_version:'1',operations:['sprite_sheet'],sprite_pricing:{minimum_frames:7,maximum_frames:100}},events:[started,{event:'asset',data:{asset_id:'44444444-4444-4444-8444-444444444444',download_url:'ASSET'}},{event:'done',data:{status:'completed'}}]}));
+  const dir=await mkdtemp(path.join(tmpdir(),'sprite-custom-'));
+  const input=path.join(dir,'reference.png');await writeFile(input,PNG);
+  try {
+   const result=await runCli(['sprite',input,'--animation-prompt','Rotate this character 360 degrees','--animation-mode','loop','--frame-size',String(size),'--frames','7','--max-credits','5.8','--out',path.join(dir,'sheet.zip'),'--quiet'],{DREAMLAYER_API_URL:api.url});
+   assert.equal(result.code,0,result.stderr);
+   assert.deepEqual(api.calls.find(c=>c.url==='/v1/execute').body.options,{animation_prompt:'Rotate this character 360 degrees',animation_mode:'loop',frame_size:size,frame_count:7});
+  } finally {api.close();}
+ });
+}
+for (const args of [['--action','walk','--animation-prompt','spin'],['--frame-size','33'],['--animation-prompt',' '],['--animation-mode','maybe']]) {
+ test(`invalid sprite options rejected before upload: ${args}`,async()=>{
+  const api=await listen(fakeApi({events:[]}));
+  try {const result=await runCli(['sprite','missing.png',...args,'--max-credits','100'],{DREAMLAYER_API_URL:api.url});assert.notEqual(result.code,0);assert.equal(api.calls.length,0);}finally{api.close();}
+ });
+}
+for (const count of [6,101,7.5]) {
+ test(`sprite CLI rejects ${count} frames before a network call`,async()=>{
+  const api=await listen(fakeApi({events:[]}));
+  try {const result=await runCli(['sprite','missing.png','--frames',String(count),'--max-credits','100'],{DREAMLAYER_API_URL:api.url});assert.notEqual(result.code,0);assert.match(result.stderr,/7 to 100/);assert.equal(api.calls.length,0);}finally{api.close();}
+ });
+}
+
+
+test("fractional funding explains affordability without changing JSON balances", async () => {
+  const body = { promotional: 0, purchased: 5.7, available: 5.8, credit_usd: "0.17" };
+  const api = await listen(fakeApi({ events: [], balanceBody: body }));
+  try {
+    const human = await runCli(["balance"], { DREAMLAYER_API_URL: api.url });
+    assert.equal(human.code, 0, human.stderr);
+    assert.match(human.stdout, /5.8 credits available/);
+    assert.match(human.stdout, /Use the available total for affordability/);
+    const json = await runCli(["balance", "--json"], { DREAMLAYER_API_URL: api.url });
+    assert.equal(json.code, 0, json.stderr);
+    assert.deepEqual(JSON.parse(json.stdout), body);
+  } finally { api.close(); }
 });
