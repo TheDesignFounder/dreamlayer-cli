@@ -46,6 +46,7 @@ USAGE
   dreamlayer upscale <image> [--out <file>]
   dreamlayer sprite <image> --action <walk|run|idle> [--frames <7–100>] --max-credits <n> [--out <zip>]
   dreamlayer answer <conversation-id> <text> [--image <file>] [--out <file>]
+  dreamlayer download <execution-id> --out <file>
   dreamlayer status <execution-id>
   dreamlayer balance
   dreamlayer capabilities
@@ -60,9 +61,18 @@ OPTIONS
   --frame-size <px> Square export: 32, 64, 128, 256, 512 (default), 720, 1080
   --frames <n>      Frame count: integer 7–100, default 12
   --max-credits <n> Maximum approved charge for the sprite job
-  --json            Machine-readable output on stdout
+  --json            JSON results on stdout; JSON errors on stderr
   --quiet           No progress on stderr
   --idempotency-key <key>  Reuse to retry safely after an uncertain response
+
+EXIT CODES
+  0 success, 1 usage/local error, 2 authentication/access, 3 credits/quota,
+  4 permanent API failure, 5 temporary failure, 6 input required
+
+AUTOMATION
+  Commands never prompt. Save a unique --idempotency-key before paid work.
+  After uncertainty, use status then download; do not start a replacement job.
+  JSON output is documented at https://docs.dreamlayer.io/cli/automation
 
 ENVIRONMENT
   DREAMLAYER_API_KEY   Required. Get one at https://platform.dreamlayer.io
@@ -189,6 +199,8 @@ function defaultOut(): string {
   return `dreamlayer-${Date.now()}.png`;
 }
 
+let recovery: { idempotency_key?: string; execution_id?: string | null } = {};
+
 async function run(
   api: ManagedClient,
   input: ManagedExecuteInput,
@@ -196,12 +208,14 @@ async function run(
 ): Promise<number> {
   const progress = new Progress(!options.quiet && process.stderr.isTTY === true);
   const idempotencyKey = options.idempotencyKey ?? randomUUID();
+  recovery = { idempotency_key: idempotencyKey };
   const outcome = await consume(api.follow(input, { idempotencyKey }), progress);
+  recovery.execution_id = outcome.execution_id;
 
   if (outcome.question) {
     progress.stop();
     if (options.json) {
-      process.stdout.write(`${JSON.stringify(outcome, null, 2)}\n`);
+      process.stdout.write(`${JSON.stringify({ ...outcome, idempotency_key: idempotencyKey }, null, 2)}\n`);
     } else {
       process.stderr.write(`\nDreamLayer needs one more thing:\n  ${outcome.question.text}\n\n`);
       // The server's needs_input question always asks for an image, so point at the
@@ -221,8 +235,8 @@ async function run(
       const terminal = terminalExecutionError(await api.getExecution(outcome.execution_id));
       if (terminal) throw terminal;
     }
-    if (options.json) process.stdout.write(`${JSON.stringify(outcome, null, 2)}\n`);
-    else process.stderr.write(`Run ended as ${outcome.status}. No credit was settled.\n`);
+    if (options.json) process.stdout.write(`${JSON.stringify({ ...outcome, idempotency_key: idempotencyKey }, null, 2)}\n`);
+    else process.stderr.write(`Run ended as ${outcome.status}. Check the execution before retrying.\n`);
     return 5;
   }
 
@@ -233,7 +247,7 @@ async function run(
   progress.stop();
 
   if (options.json) {
-    process.stdout.write(`${JSON.stringify({ ...outcome, file: path.resolve(target) }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ ...outcome, idempotency_key: idempotencyKey, file: path.resolve(target) }, null, 2)}\n`);
   } else {
     // The path on stdout and nothing else, so `$(dreamlayer generate ...)` is the file.
     process.stdout.write(`${target}\n`);
@@ -325,6 +339,10 @@ async function main(argv: string[]): Promise<number> {
     process.stdout.write(USAGE);
     return command ? 0 : 1;
   }
+  if (rest.includes("--help") || rest.includes("-h")) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
   if (command === "--version" || command === "-v") {
     process.stdout.write(`${PACKAGE_VERSION}\n`);
     return 0;
@@ -388,6 +406,19 @@ async function main(argv: string[]): Promise<number> {
         options,
       );
     }
+    case "download": {
+      const executionId = positional[0];
+      if (!executionId || positional.length !== 1 || !options.out) throw new UsageError("download needs one execution id and --out <file>");
+      const api = client();
+      recovery = { execution_id: executionId };
+      const execution = await api.getExecution(executionId);
+      const assets = execution.image_job?.finished_assets;
+      if (execution.status !== "completed" || !Array.isArray(assets) || assets.length !== 1 || typeof assets[0]?.download_url !== "string") throw new UsageError("The execution has no finished asset. Check status before downloading.");
+      const bytes = await api.download(assets[0].download_url);
+      await writeFile(options.out, bytes, { flag: "wx" });
+      process.stdout.write(options.json ? `${JSON.stringify({ execution_id: executionId, file: path.resolve(options.out), bytes: bytes.length })}\n` : `${options.out}\n`);
+      return 0;
+    }
     case "status": {
       const executionId = positional[0];
       if (!executionId) throw new UsageError("status needs an execution id");
@@ -427,6 +458,19 @@ main(process.argv.slice(2))
     process.exitCode = code;
   })
   .catch((error: unknown) => {
+    if (process.argv.slice(2).includes("--json")) {
+      const partial = (error as { partialOutcome?: { execution_id?: string | null } } | null)?.partialOutcome;
+      const temporary = error instanceof StreamIdleError || error instanceof UploadTimeoutError;
+      const envelope = error instanceof ApiError ? error.toPublicEnvelope() : {
+        error: { code: error instanceof UsageError ? "VALIDATION_FAILED" : temporary ? "SERVICE_UNAVAILABLE" : "INTERNAL_ERROR",
+          reason: error instanceof UsageError ? "invalid_request" : temporary ? "temporarily_unavailable" : "generation_failed",
+          message: error instanceof UsageError ? "Check command arguments and local input or output files; use --help." : temporary ? "The request timed out. Check the saved execution before retrying." : "The command could not complete. Check saved execution state and local output access.",
+          retryable: temporary, request_id: null },
+      };
+      process.stderr.write(`${JSON.stringify({ error: { ...(envelope.error as Record<string, unknown>), ...recovery, ...(partial?.execution_id ? { execution_id: partial.execution_id } : {}) } })}\n`);
+      process.exitCode = error instanceof ApiError ? exitCodeFor(error) : temporary ? 5 : 1;
+      return;
+    }
     if (error instanceof UsageError) {
       process.stderr.write(`${error.message}\n`);
       process.exitCode = 1;
