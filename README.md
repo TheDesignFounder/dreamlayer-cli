@@ -21,6 +21,7 @@ dreamlayer cutout <image> [--out file.png]      # background removal
 dreamlayer upscale <image> [--out file.png]     # 2x
 dreamlayer answer <conversation-id> <text> [--image file.png]
 dreamlayer status <execution-id>
+dreamlayer download <execution-id> --out file.png
 dreamlayer balance                              # spends nothing
 dreamlayer capabilities                         # spends nothing
 ```
@@ -77,8 +78,8 @@ dreamlayer balance --json
 
 ## Retries are safe if you reuse the key
 
-An idempotency key is generated per run. After an uncertain response, pass the same one
-back and the original result replays instead of paying twice:
+Save a key before starting text generation. After an uncertain response, reuse that key
+and the identical prompt/options, or check the existing execution first:
 
 ```bash
 dreamlayer generate "a fox logo" --idempotency-key fox-001
@@ -124,3 +125,27 @@ dreamlayer status EXECUTION_ID
 Set `--max-credits` to the amount you approve after checking the current price. The CLI reconnects to existing work if an event stream closes.
 
 For affordability, compare the complete rounded quote in **credits** with `available`. One tenth of a credit is $0.017. Promotional and purchased amounts are displayed rounded down separately, so their displayed sum can be 0.1 credit below `available`; stored fractions are preserved. Compare against the combined total, not that sum. The order charge rounds only once, never per frame or per tier.
+
+## Automating recovery
+
+Commands never prompt. `--json` sends results to stdout and structured errors to stderr,
+including usage and transport errors. Exit 0 from `status` means the read succeeded;
+inspect its `status` field to learn whether the execution completed.
+
+After a lost download, recover the existing execution without generation:
+
+```sh
+dreamlayer status EXECUTION_ID --json
+dreamlayer download EXECUTION_ID --out recovered.png --json
+```
+
+`download` refuses to overwrite a file. Use `.zip` for sprite results. Generation errors
+in JSON include the available execution ID and idempotency key for recovery. Treat them
+as private identifiers. For file-based commands, rerunning uploads a new asset: the same
+local file is not an identical API request. Prefer `status` and `download`, or the
+[journaled API examples](https://docs.dreamlayer.io/agent-api/examples).
+
+[API overview](https://docs.dreamlayer.io/agent-api) ·
+[Limits](https://docs.dreamlayer.io/agent-api/limits) ·
+[Automation](https://docs.dreamlayer.io/cli/automation) ·
+[MCP tools](https://docs.dreamlayer.io/mcp/tools)

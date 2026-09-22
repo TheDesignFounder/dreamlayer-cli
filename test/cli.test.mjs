@@ -322,7 +322,7 @@ test("balance rejects inconsistent or expanded responses without echoing private
   api.close();
 
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /Invalid DreamLayer balance response/);
+  assert.equal(JSON.parse(result.stderr).error.code, "INTERNAL_ERROR");
   assert.doesNotMatch(result.stderr, /do-not-print-this/);
   assert.equal(result.stdout, "");
 });
@@ -979,5 +979,44 @@ test("fractional funding explains affordability without changing JSON balances",
     const json = await runCli(["balance", "--json"], { DREAMLAYER_API_URL: api.url });
     assert.equal(json.code, 0, json.stderr);
     assert.deepEqual(JSON.parse(json.stdout), body);
+  } finally { api.close(); }
+});
+
+
+test("JSON usage errors remain parseable and do not leak local arguments", async () => {
+  const result = await runCli(["edit", "/private/customer-photo.png", "--json"], {});
+  assert.equal(result.code, 1);
+  assert.equal(result.stdout, "");
+  assert.equal(JSON.parse(result.stderr).error.reason, "invalid_request");
+  assert.doesNotMatch(result.stderr, /customer-photo/);
+});
+
+test("subcommand help requires no credentials or network", async () => {
+  const result = await runCli(["sprite", "--help"], { DREAMLAYER_API_KEY: "" });
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /EXIT CODES/);
+});
+
+test("download recovers existing assets using GET only and refuses overwrite", async () => {
+  const handler = fakeApi({});
+  const api = await listen(handler);
+  const directory = await mkdtemp(path.join(tmpdir(), "dreamlayer-download-"));
+  const destination = path.join(directory, "result.png");
+  handler.server.removeAllListeners('request');
+  handler.server.on('request', (request, response) => {
+    handler.calls.push({ method: request.method, url: request.url });
+    if (request.url === '/asset.png') return response.end(PNG);
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ status: 'completed', image_job: { finished_assets: [{ download_url: api.url + '/asset.png' }] } }));
+  });
+  try {
+    const result = await runCli(['download', 'owned', '--out', destination, '--json'], { DREAMLAYER_API_URL: api.url });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).execution_id, 'owned');
+    assert.deepEqual(await readFile(destination), PNG);
+    assert.ok(handler.calls.every(call => call.method === 'GET'));
+    const duplicate = await runCli(['download', 'owned', '--out', destination, '--json'], { DREAMLAYER_API_URL: api.url });
+    assert.equal(duplicate.code, 1);
+    assert.deepEqual(await readFile(destination), PNG);
   } finally { api.close(); }
 });
