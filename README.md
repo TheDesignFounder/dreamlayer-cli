@@ -85,21 +85,21 @@ and the identical prompt/options, or check the existing execution first:
 dreamlayer generate "a fox logo" --idempotency-key fox-001
 ```
 
-## A question is not a failure
+## Continue a question from another client
 
-An edit-shaped prompt with no image exits 6 and asks for one:
+The CLI's `generate`, `edit`, `cutout`, `upscale`, and `sprite` commands select their
+operation explicitly. `generate "remove the background"` therefore remains a
+text-to-image request; use `cutout image.png` to remove a background.
+
+A conversational request made through the API or MCP can instead ask for missing
+input. Continue that conversation from the CLI using its saved conversation ID:
 
 ```bash
-dreamlayer generate "remove the background"
-# Which image should I use? Upload or attach one, then respond.
-#   dreamlayer answer <id> "your answer" --image <file>
+dreamlayer answer <conversation-id> "Use this image" --image reference.png
 ```
 
-Answer it with the image attached. Words alone are refused, because the question is
-asking for a picture, not a clarification.
-
-Naming an operation avoids the round trip entirely, which is why `cutout`, `upscale`,
-`edit`, and `generate` all do.
+An answer that needs an image must attach one. Exit code 6 means the returned
+conversation needs input; it does not mean a generation failed.
 
 ## Requirements
 
