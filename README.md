@@ -139,13 +139,31 @@ dreamlayer status EXECUTION_ID --json
 dreamlayer download EXECUTION_ID --out recovered.png --json
 ```
 
-`download` refuses to overwrite a file. Use `.zip` for sprite results. Generation errors
+All output commands refuse to overwrite existing files, directories, or symlinks.
+Paid commands check `--out` before uploads or `/v1/execute`: an existing destination
+returns `output_exists` (exit 1) without submitting or charging a new job. A missing or
+unwritable parent returns `output_unavailable` (exit 1). Re-running a batch with the
+same output paths therefore stops on completed files before paid work. Choose a new
+path only for intentionally new work. The final write is still exclusive: if another
+process creates the destination during generation, use the saved execution ID to
+recover the completed output with `download`.
+
+`download` also refuses to overwrite a file. Use `.zip` for sprite results. Generation errors
 in JSON include the available execution ID and idempotency key for recovery. Treat them
 as private identifiers. For file-based commands, rerunning uploads a new asset: the same
 local file is not an identical API request. Prefer `status` and `download`, or the
-[journaled API examples](https://docs.dreamlayer.io/agent-api/examples).
+[execution recovery guide](https://docs.dreamlayer.io/agent-api/jobs-and-events).
 
 [API overview](https://docs.dreamlayer.io/agent-api) ·
-[Limits](https://docs.dreamlayer.io/agent-api/limits) ·
-[Automation](https://docs.dreamlayer.io/cli/automation) ·
-[MCP tools](https://docs.dreamlayer.io/mcp/tools)
+[CLI guide](https://docs.dreamlayer.io/cli) ·
+[MCP setup](https://docs.dreamlayer.io/mcp/index)
+
+Local client failures are separate from API generation failures. `local_output_failed`
+(exit 1) means the completed output could not be written; fix the destination and run
+`download` with the saved execution ID. `download_failed` or `output_not_ready` (exit 5)
+also require recovery of existing work, not a new generation. `retryable: true` means
+retry the indicated recovery action, never blindly repeat a paid command.
+`local_input_failed` (exit 1) means no readable input was supplied; missing credentials
+use `authentication_failed` (exit 2). A cancelled run uses `execution_cancelled`, exit 4,
+and a JSON error on stderr. Unknown client failures use `client_error`; they do not
+prove that the server-side generation failed.

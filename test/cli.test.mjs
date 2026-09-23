@@ -9,7 +9,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, symlink } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -125,6 +126,7 @@ function fakeApi(behaviour) {
       request.on("end", () => {
         const body = raw ? JSON.parse(raw) : {};
         calls[calls.length - 1].body = body;
+        behaviour.onExecute?.();
 
         // The real request model is CLOSED: an unknown key is a 422, not a field the
         // server quietly ignores. Mirror that, or a client that invents a field passes
@@ -597,7 +599,7 @@ test("a bad file is rejected locally, before anything is uploaded or charged", a
   api.close();
 
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /cannot read/);
+  assert.match(result.stderr, /local input file could not be read/);
   assert.equal(touched, 0, "an unreadable file must never reach the API");
 });
 
@@ -1017,6 +1019,145 @@ test("download recovers existing assets using GET only and refuses overwrite", a
     assert.ok(handler.calls.every(call => call.method === 'GET'));
     const duplicate = await runCli(['download', 'owned', '--out', destination, '--json'], { DREAMLAYER_API_URL: api.url });
     assert.equal(duplicate.code, 1);
+    const failure = JSON.parse(duplicate.stderr).error;
+    assert.equal(failure.reason, 'local_output_failed');
+    assert.equal(failure.execution_id, 'owned');
+    assert.equal(failure.retryable, true);
+    assert.match(failure.guidance, /dreamlayer download/);
     assert.deepEqual(await readFile(destination), PNG);
+  } finally { api.close(); }
+});
+
+for (const json of [false, true]) {
+  test(`destination appearing during generation preserves download recovery (json=${json})`, async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "dl-output-failed-"));
+    const destination = path.join(directory, "result.png");
+    const api = await listen(fakeApi({ onExecute: () => writeFileSync(destination, 'another process'), events: [started,
+      { event: 'asset', data: {asset_id: '44444444-4444-4444-8444-444444444444', download_url: 'ASSET'} },
+      { event: 'done', data: { status: 'completed' } }] }));
+    try {
+      const result = await runCli(['generate', 'a tree', '--out', destination, '--idempotency-key', 'saved-request', ...(json ? ['--json'] : [])], {DREAMLAYER_API_URL: api.url});
+      assert.equal(result.code, 1);
+      assert.equal(result.stdout, '');
+      if (json) {
+        const error = JSON.parse(result.stderr).error;
+        assert.equal(error.reason, 'local_output_failed');
+        assert.equal(error.retryable, true);
+        assert.equal(error.execution_id, started.data.execution_id);
+        assert.equal(error.idempotency_key, 'saved-request');
+        assert.equal(await readFile(destination, 'utf8'), 'another process');
+      } else {
+        assert.match(result.stderr, /dreamlayer download/);
+        assert.ok(result.stderr.includes(started.data.execution_id));
+      }
+      assert.equal(api.calls.filter(c => c.method === 'POST' && c.url === '/v1/execute').length, 1);
+    } finally { api.close(); }
+  });
+}
+
+test('missing key and unreadable input have distinct sanitized errors before network work', async () => {
+  const api = await listen(fakeApi({events: []}));
+  try {
+    const auth = await runCli(['balance', '--json'], {DREAMLAYER_API_KEY: '', DREAMLAYER_API_URL: api.url});
+    assert.equal(auth.code, 2);
+    assert.equal(JSON.parse(auth.stderr).error.reason, 'authentication_failed');
+    const file = await runCli(['edit', '/private/customer-secret-photo.png', 'a real prompt', '--json'], {DREAMLAYER_API_URL: api.url});
+    assert.equal(file.code, 1);
+    assert.equal(JSON.parse(file.stderr).error.reason, 'local_input_failed');
+    assert.doesNotMatch(file.stderr, /customer-secret-photo/);
+    assert.equal(api.calls.length, 0);
+  } finally { api.close(); }
+});
+
+for (const state of [{status: 'running'}, {status: 'completed', image_job: {finished_assets: [{download_url: 'one'}, {download_url: 'two'}]}}]) {
+  test(`download refuses ${state.status} without one output, and does not generate`, async () => {
+    const api = await listen(fakeApi({events: [], execution: state}));
+    try {
+      const result = await runCli(['download', 'owned', '--out', 'unused.png', '--json'], {DREAMLAYER_API_URL: api.url});
+      assert.equal(result.code, 5);
+      assert.equal(JSON.parse(result.stderr).error.reason, 'output_not_ready');
+      assert.deepEqual(api.calls.map(c => c.method), ['GET']);
+    } finally { api.close(); }
+  });
+}
+
+test('cancelled execution is a nonretryable stderr result', async () => {
+  const api = await listen(fakeApi({events: [started, {event: 'done', data: {status: 'cancelled'}}]}));
+  try {
+    const result = await runCli(['generate', 'a tree', '--json'], {DREAMLAYER_API_URL: api.url});
+    assert.equal(result.code, 4);
+    assert.equal(result.stdout, '');
+    assert.equal(JSON.parse(result.stderr).error.reason, 'execution_cancelled');
+    assert.equal(JSON.parse(result.stderr).error.retryable, false);
+  } finally { api.close(); }
+});
+
+test('stream without an identifier is uncertain rather than a failed generation', async () => {
+  const api = await listen(fakeApi({events: []}));
+  try {
+    const result = await runCli(['generate', 'a tree', '--idempotency-key', 'saved-request', '--json'], {DREAMLAYER_API_URL: api.url});
+    assert.equal(result.code, 5);
+    const error = JSON.parse(result.stderr).error;
+    assert.equal(error.reason, 'temporarily_unavailable');
+    assert.equal(error.idempotency_key, 'saved-request');
+    assert.equal(api.calls.filter(c => c.method === 'POST').length, 1);
+  } finally { api.close(); }
+});
+
+for (const command of [
+  ['generate', 'a tree'], ['edit', 'missing.png', 'make it blue'],
+  ['cutout', 'missing.png'], ['upscale', 'missing.png'],
+  ['sprite', 'missing.png', '--max-credits', '100'], ['answer', 'conversation', 'yes']
+]) {
+  test(`${command[0]} refuses an existing output before any network request`, async () => {
+    const api = await listen(fakeApi({events: []}));
+    const dir = await mkdtemp(path.join(tmpdir(), 'dl-preflight-'));
+    const out = path.join(dir, 'existing.png'); await writeFile(out, 'completed');
+    try {
+      const result = await runCli([...command, '--out', out, '--json'], {DREAMLAYER_API_URL: api.url});
+      assert.equal(result.code, 1);
+      const error = JSON.parse(result.stderr).error;
+      assert.equal(error.reason, 'output_exists');
+      assert.equal(error.retryable, false);
+      assert.match(error.message, /no generation was submitted/i);
+      assert.equal(api.calls.length, 0);
+      assert.equal(await readFile(out, 'utf8'), 'completed');
+    } finally { api.close(); }
+  });
+}
+
+for (const kind of ['directory', 'dangling symlink', 'missing parent']) {
+  test(`paid output preflight refuses ${kind} before submission`, async () => {
+    const api = await listen(fakeApi({events: []}));
+    const dir = await mkdtemp(path.join(tmpdir(), 'dl-preflight-kind-'));
+    let out = dir;
+    if (kind === 'dangling symlink') { out = path.join(dir, 'link'); await symlink(path.join(dir, 'missing'), out); }
+    if (kind === 'missing parent') out = path.join(dir, 'missing', 'out.png');
+    try {
+      const result = await runCli(['generate', 'a tree', '--out', out, '--json'], {DREAMLAYER_API_URL: api.url});
+      assert.equal(result.code, 1);
+      assert.equal(JSON.parse(result.stderr).error.reason, kind === 'missing parent' ? 'output_unavailable' : 'output_exists');
+      assert.equal(api.calls.length, 0);
+    } finally { api.close(); }
+  });
+}
+
+test('repeating a successful command with the same output does not submit a second paid job', async () => {
+  const api = await listen(fakeApi({events: [started,
+    {event:'asset',data:{asset_id:'44444444-4444-4444-8444-444444444444',download_url:'ASSET'}},
+    {event:'done',data:{status:'completed'}}]}));
+  const dir = await mkdtemp(path.join(tmpdir(), 'dl-repeat-'));
+  const out = path.join(dir, 'same.png');
+  try {
+    const args = ['generate', 'a tree', '--out', out, '--json'];
+    const first = await runCli(args, {DREAMLAYER_API_URL: api.url});
+    assert.equal(first.code, 0, first.stderr);
+    const second = await runCli(args, {DREAMLAYER_API_URL: api.url});
+    assert.equal(second.code, 1);
+    assert.equal(JSON.parse(second.stderr).error.reason, 'output_exists');
+    assert.equal(api.calls.filter(c => c.method === 'POST' && c.url === '/v1/execute').length, 1);
+    assert.deepEqual(await readFile(out), PNG);
+    const help = await runCli(['--help'], {});
+    assert.match(help.stdout, /Existing destinations are refused before paid submission/);
   } finally { api.close(); }
 });

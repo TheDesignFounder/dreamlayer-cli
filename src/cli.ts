@@ -16,12 +16,14 @@ import { spriteCreditPrice } from "./client.js";
  *   6  the run ended asking a question instead of producing an image
  */
 import { randomUUID } from "node:crypto";
-import { openAsBlob, readFileSync } from "node:fs";
-import { stat, writeFile } from "node:fs/promises";
+import { constants, openAsBlob, readFileSync } from "node:fs";
+import { access, lstat, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
   ApiError,
+  InputValidationError,
+  RecoveryRequiredError,
   KNOWN_OPERATIONS,
   ManagedClient,
   StreamIdleError,
@@ -52,7 +54,8 @@ USAGE
   dreamlayer capabilities
 
 OPTIONS
-  --out <file>      Where to write the image. Default: dreamlayer-<n>.png
+  --out <file>      New output file; never overwrites. Default: dreamlayer-<n>.png
+                    Existing destinations are refused before paid submission.
   --image <file>    Attach an image when answering a question that asks for one
   --aspect <ratio>  1:1, 16:9, 9:16, 4:3, 3:4. Default 1:1
   --action <name>  Sprite preset: walk, run, idle (walk if no custom prompt)
@@ -72,7 +75,7 @@ EXIT CODES
 AUTOMATION
   Commands never prompt. Save a unique --idempotency-key before paid work.
   After uncertainty, use status then download; do not start a replacement job.
-  JSON output is documented at https://docs.dreamlayer.io/cli/automation
+  CLI guide: https://docs.dreamlayer.io/cli
 
 ENVIRONMENT
   DREAMLAYER_API_KEY   Required. Get one at https://platform.dreamlayer.io
@@ -97,6 +100,41 @@ type Options = {
 };
 
 class UsageError extends Error {}
+class CommandError extends Error {
+  constructor(readonly reason: string, message: string, readonly exitCode: number, readonly retryable = false, readonly guidance?: string) { super(message); }
+}
+async function preflightOutput(target: string): Promise<void> {
+  // lstat also detects dangling symlinks. The final exclusive write remains
+  // necessary because another process can create the destination during the job.
+  let exists = false;
+  try {
+    await lstat(target);
+    exists = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new CommandError("output_unavailable", "The output destination could not be checked. No generation was submitted.", 1);
+    }
+  }
+  if (exists) {
+    throw new CommandError("output_exists", "The output destination already exists. Refusing to overwrite; no generation was submitted.", 1, false, "Use the existing output or choose a new --out path for intentionally new work.");
+  }
+  try {
+    const parent = path.dirname(path.resolve(target));
+    if (!(await stat(parent)).isDirectory()) throw new Error("not a directory");
+    await access(parent, constants.W_OK | constants.X_OK);
+  } catch {
+    throw new CommandError("output_unavailable", "The output parent must be an existing writable directory. No generation was submitted.", 1);
+  }
+}
+
+async function saveOutput(target: string, bytes: Uint8Array): Promise<void> {
+  try { await writeFile(target, bytes, { flag: "wx" }); }
+  catch { throw new CommandError("local_output_failed", "The output could not be saved locally. Generation has already completed.", 1, true, "Fix the destination or choose a new path, then use dreamlayer download with the saved execution_id. Do not generate again."); }
+}
+async function downloadOutput(api: ManagedClient, url: string): Promise<Uint8Array> {
+  try { return await api.download(url); }
+  catch { throw new CommandError("download_failed", "The completed output could not be downloaded.", 5, true, "Retry dreamlayer download with the saved execution_id. Do not generate again."); }
+}
 
 function parseOptions(argv: string[]): { positional: string[]; options: Options } {
   const positional: string[] = [];
@@ -166,11 +204,7 @@ function parseOptions(argv: string[]): { positional: string[]; options: Options 
 function client(): ManagedClient {
   const key = (process.env.DREAMLAYER_API_KEY ?? "").trim();
   if (!key) {
-    throw new UsageError(
-      "DREAMLAYER_API_KEY is not set.\n" +
-        "  export DREAMLAYER_API_KEY=dlr_live_...\n" +
-        "  Get a key at https://platform.dreamlayer.io",
-    );
+    throw new CommandError("authentication_failed", "DREAMLAYER_API_KEY is not set. Get a key at https://platform.dreamlayer.io", 2);
   }
   return new ManagedClient(key, (process.env.DREAMLAYER_API_URL ?? "https://api.dreamlayer.io").trim());
 }
@@ -184,14 +218,17 @@ async function upload(api: ManagedClient, file: string): Promise<string> {
   try {
     fileStat = await stat(resolved);
   } catch {
-    throw new UsageError(`cannot read ${file}`);
+    throw new CommandError("local_input_failed", "The local input file could not be read.", 1);
   }
   if (fileStat.size > MAX_SOURCE_BYTES) {
     throw new UsageError(
       `${file} is ${Math.round(fileStat.size / 1024 / 1024)} MB; the limit is 200 MB`,
     );
   }
-  const asset = await api.uploadInput(await openAsBlob(resolved), path.basename(resolved));
+  let blob: Blob;
+  try { blob = await openAsBlob(resolved); }
+  catch { throw new CommandError("local_input_failed", "The local input file could not be read.", 1); }
+  const asset = await api.uploadInput(blob, path.basename(resolved));
   return asset.input_asset_id;
 }
 
@@ -235,15 +272,15 @@ async function run(
       const terminal = terminalExecutionError(await api.getExecution(outcome.execution_id));
       if (terminal) throw terminal;
     }
-    if (options.json) process.stdout.write(`${JSON.stringify({ ...outcome, idempotency_key: idempotencyKey }, null, 2)}\n`);
-    else process.stderr.write(`Run ended as ${outcome.status}. Check the execution before retrying.\n`);
-    return 5;
+    if (outcome.status === "cancelled") throw new CommandError("execution_cancelled", "The execution was cancelled.", 4);
+    if (outcome.status === "failed") throw new CommandError("generation_failed", "The execution failed. Read canonical state for details.", 4);
+    throw new RecoveryRequiredError("The execution has no completed output yet. Read its saved state.");
   }
 
   progress.set("Downloading");
-  const bytes = await api.download(outcome.asset.download_url);
+  const bytes = await downloadOutput(api, outcome.asset.download_url);
   const target = options.out ?? (input.operation === "sprite_sheet" ? `dreamlayer-${Date.now()}.zip` : defaultOut());
-  await writeFile(target, bytes);
+  await saveOutput(target, bytes);
   progress.stop();
 
   if (options.json) {
@@ -349,6 +386,10 @@ async function main(argv: string[]): Promise<number> {
   }
 
   const { positional, options } = parseOptions(rest);
+  if (["generate", "edit", "cutout", "upscale", "sprite", "answer"].includes(command)) {
+    options.out ??= command === "sprite" ? `dreamlayer-${Date.now()}.zip` : defaultOut();
+    await preflightOutput(options.out);
+  }
 
   switch (command) {
     case "sprite": {
@@ -413,9 +454,9 @@ async function main(argv: string[]): Promise<number> {
       recovery = { execution_id: executionId };
       const execution = await api.getExecution(executionId);
       const assets = execution.image_job?.finished_assets;
-      if (execution.status !== "completed" || !Array.isArray(assets) || assets.length !== 1 || typeof assets[0]?.download_url !== "string") throw new UsageError("The execution has no finished asset. Check status before downloading.");
-      const bytes = await api.download(assets[0].download_url);
-      await writeFile(options.out, bytes, { flag: "wx" });
+      if (execution.status !== "completed" || !Array.isArray(assets) || assets.length !== 1 || typeof assets[0]?.download_url !== "string") throw new CommandError("output_not_ready", "The execution has no single finished asset. Check status before downloading.", 5, true, "Read the saved execution; do not generate again.");
+      const bytes = await downloadOutput(api, assets[0].download_url);
+      await saveOutput(options.out, bytes);
       process.stdout.write(options.json ? `${JSON.stringify({ execution_id: executionId, file: path.resolve(options.out), bytes: bytes.length })}\n` : `${options.out}\n`);
       return 0;
     }
@@ -458,12 +499,29 @@ main(process.argv.slice(2))
     process.exitCode = code;
   })
   .catch((error: unknown) => {
+    const known = error instanceof CommandError ? error : error instanceof InputValidationError
+      ? new CommandError("invalid_request", error.message, 1)
+      : error instanceof RecoveryRequiredError
+      ? new CommandError("temporarily_unavailable", "Execution state is uncertain. Read saved state before retrying.", 5, true, "Use status and download for the saved execution. If no ID was received, replay identical inputs with the original idempotency key.") : null;
+    if (known) {
+      const partial = (error as { partialOutcome?: { execution_id?: string | null } }).partialOutcome;
+      const identity = { ...recovery, ...(partial?.execution_id ? { execution_id: partial.execution_id } : {}) };
+      const envelope = { error: { code: "CLIENT_ERROR", reason: known.reason, message: known.message, retryable: known.retryable, request_id: null, guidance: known.guidance, ...identity } };
+      if (process.argv.slice(2).includes("--json")) process.stderr.write(`${JSON.stringify(envelope)}\n`);
+      else {
+        process.stderr.write(`${known.message}\n${known.guidance ?? ""}\n`);
+        if (identity.execution_id) process.stderr.write(`Execution: ${identity.execution_id}\n  dreamlayer status ${identity.execution_id}\n  dreamlayer download ${identity.execution_id} --out <new-file>\n`);
+        if (identity.idempotency_key) process.stderr.write(`Idempotency key: ${identity.idempotency_key}\n`);
+      }
+      process.exitCode = known.exitCode;
+      return;
+    }
     if (process.argv.slice(2).includes("--json")) {
       const partial = (error as { partialOutcome?: { execution_id?: string | null } } | null)?.partialOutcome;
       const temporary = error instanceof StreamIdleError || error instanceof UploadTimeoutError;
       const envelope = error instanceof ApiError ? error.toPublicEnvelope() : {
         error: { code: error instanceof UsageError ? "VALIDATION_FAILED" : temporary ? "SERVICE_UNAVAILABLE" : "INTERNAL_ERROR",
-          reason: error instanceof UsageError ? "invalid_request" : temporary ? "temporarily_unavailable" : "generation_failed",
+          reason: error instanceof UsageError ? "invalid_request" : temporary ? "temporarily_unavailable" : "client_error",
           message: error instanceof UsageError ? "Check command arguments and local input or output files; use --help." : temporary ? "The request timed out. Check the saved execution before retrying." : "The command could not complete. Check saved execution state and local output access.",
           retryable: temporary, request_id: null },
       };
