@@ -9,7 +9,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, symlink } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -125,6 +126,7 @@ function fakeApi(behaviour) {
       request.on("end", () => {
         const body = raw ? JSON.parse(raw) : {};
         calls[calls.length - 1].body = body;
+        behaviour.onExecute?.();
 
         // The real request model is CLOSED: an unknown key is a 422, not a field the
         // server quietly ignores. Mirror that, or a client that invents a field passes
@@ -1027,13 +1029,14 @@ test("download recovers existing assets using GET only and refuses overwrite", a
 });
 
 for (const json of [false, true]) {
-  test(`completed generation with unwritable output preserves download recovery (json=${json})`, async () => {
-    const api = await listen(fakeApi({ events: [started,
+  test(`destination appearing during generation preserves download recovery (json=${json})`, async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "dl-output-failed-"));
+    const destination = path.join(directory, "result.png");
+    const api = await listen(fakeApi({ onExecute: () => writeFileSync(destination, 'another process'), events: [started,
       { event: 'asset', data: {asset_id: '44444444-4444-4444-8444-444444444444', download_url: 'ASSET'} },
       { event: 'done', data: { status: 'completed' } }] }));
-    const directory = await mkdtemp(path.join(tmpdir(), 'dl-output-failed-'));
     try {
-      const result = await runCli(['generate', 'a tree', '--out', path.join(directory, 'missing', 'result.png'), '--idempotency-key', 'saved-request', ...(json ? ['--json'] : [])], {DREAMLAYER_API_URL: api.url});
+      const result = await runCli(['generate', 'a tree', '--out', destination, '--idempotency-key', 'saved-request', ...(json ? ['--json'] : [])], {DREAMLAYER_API_URL: api.url});
       assert.equal(result.code, 1);
       assert.equal(result.stdout, '');
       if (json) {
@@ -1042,6 +1045,7 @@ for (const json of [false, true]) {
         assert.equal(error.retryable, true);
         assert.equal(error.execution_id, started.data.execution_id);
         assert.equal(error.idempotency_key, 'saved-request');
+        assert.equal(await readFile(destination, 'utf8'), 'another process');
       } else {
         assert.match(result.stderr, /dreamlayer download/);
         assert.ok(result.stderr.includes(started.data.execution_id));
@@ -1097,5 +1101,63 @@ test('stream without an identifier is uncertain rather than a failed generation'
     assert.equal(error.reason, 'temporarily_unavailable');
     assert.equal(error.idempotency_key, 'saved-request');
     assert.equal(api.calls.filter(c => c.method === 'POST').length, 1);
+  } finally { api.close(); }
+});
+
+for (const command of [
+  ['generate', 'a tree'], ['edit', 'missing.png', 'make it blue'],
+  ['cutout', 'missing.png'], ['upscale', 'missing.png'],
+  ['sprite', 'missing.png', '--max-credits', '100'], ['answer', 'conversation', 'yes']
+]) {
+  test(`${command[0]} refuses an existing output before any network request`, async () => {
+    const api = await listen(fakeApi({events: []}));
+    const dir = await mkdtemp(path.join(tmpdir(), 'dl-preflight-'));
+    const out = path.join(dir, 'existing.png'); await writeFile(out, 'completed');
+    try {
+      const result = await runCli([...command, '--out', out, '--json'], {DREAMLAYER_API_URL: api.url});
+      assert.equal(result.code, 1);
+      const error = JSON.parse(result.stderr).error;
+      assert.equal(error.reason, 'output_exists');
+      assert.equal(error.retryable, false);
+      assert.match(error.message, /no generation was submitted/i);
+      assert.equal(api.calls.length, 0);
+      assert.equal(await readFile(out, 'utf8'), 'completed');
+    } finally { api.close(); }
+  });
+}
+
+for (const kind of ['directory', 'dangling symlink', 'missing parent']) {
+  test(`paid output preflight refuses ${kind} before submission`, async () => {
+    const api = await listen(fakeApi({events: []}));
+    const dir = await mkdtemp(path.join(tmpdir(), 'dl-preflight-kind-'));
+    let out = dir;
+    if (kind === 'dangling symlink') { out = path.join(dir, 'link'); await symlink(path.join(dir, 'missing'), out); }
+    if (kind === 'missing parent') out = path.join(dir, 'missing', 'out.png');
+    try {
+      const result = await runCli(['generate', 'a tree', '--out', out, '--json'], {DREAMLAYER_API_URL: api.url});
+      assert.equal(result.code, 1);
+      assert.equal(JSON.parse(result.stderr).error.reason, kind === 'missing parent' ? 'output_unavailable' : 'output_exists');
+      assert.equal(api.calls.length, 0);
+    } finally { api.close(); }
+  });
+}
+
+test('repeating a successful command with the same output does not submit a second paid job', async () => {
+  const api = await listen(fakeApi({events: [started,
+    {event:'asset',data:{asset_id:'44444444-4444-4444-8444-444444444444',download_url:'ASSET'}},
+    {event:'done',data:{status:'completed'}}]}));
+  const dir = await mkdtemp(path.join(tmpdir(), 'dl-repeat-'));
+  const out = path.join(dir, 'same.png');
+  try {
+    const args = ['generate', 'a tree', '--out', out, '--json'];
+    const first = await runCli(args, {DREAMLAYER_API_URL: api.url});
+    assert.equal(first.code, 0, first.stderr);
+    const second = await runCli(args, {DREAMLAYER_API_URL: api.url});
+    assert.equal(second.code, 1);
+    assert.equal(JSON.parse(second.stderr).error.reason, 'output_exists');
+    assert.equal(api.calls.filter(c => c.method === 'POST' && c.url === '/v1/execute').length, 1);
+    assert.deepEqual(await readFile(out), PNG);
+    const help = await runCli(['--help'], {});
+    assert.match(help.stdout, /Existing destinations are refused before paid submission/);
   } finally { api.close(); }
 });

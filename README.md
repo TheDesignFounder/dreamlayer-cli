@@ -139,7 +139,16 @@ dreamlayer status EXECUTION_ID --json
 dreamlayer download EXECUTION_ID --out recovered.png --json
 ```
 
-`download` refuses to overwrite a file. Use `.zip` for sprite results. Generation errors
+All output commands refuse to overwrite existing files, directories, or symlinks.
+Paid commands check `--out` before uploads or `/v1/execute`: an existing destination
+returns `output_exists` (exit 1) without submitting or charging a new job. A missing or
+unwritable parent returns `output_unavailable` (exit 1). Re-running a batch with the
+same output paths therefore stops on completed files before paid work. Choose a new
+path only for intentionally new work. The final write is still exclusive: if another
+process creates the destination during generation, use the saved execution ID to
+recover the completed output with `download`.
+
+`download` also refuses to overwrite a file. Use `.zip` for sprite results. Generation errors
 in JSON include the available execution ID and idempotency key for recovery. Treat them
 as private identifiers. For file-based commands, rerunning uploads a new asset: the same
 local file is not an identical API request. Prefer `status` and `download`, or the
@@ -147,7 +156,7 @@ local file is not an identical API request. Prefer `status` and `download`, or t
 
 [API overview](https://docs.dreamlayer.io/agent-api) ·
 [CLI guide](https://docs.dreamlayer.io/cli) ·
-[MCP setup](https://docs.dreamlayer.io/mcp)
+[MCP setup](https://docs.dreamlayer.io/mcp/index)
 
 Local client failures are separate from API generation failures. `local_output_failed`
 (exit 1) means the completed output could not be written; fix the destination and run

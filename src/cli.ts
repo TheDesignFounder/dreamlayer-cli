@@ -16,8 +16,8 @@ import { spriteCreditPrice } from "./client.js";
  *   6  the run ended asking a question instead of producing an image
  */
 import { randomUUID } from "node:crypto";
-import { openAsBlob, readFileSync } from "node:fs";
-import { stat, writeFile } from "node:fs/promises";
+import { constants, openAsBlob, readFileSync } from "node:fs";
+import { access, lstat, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -54,7 +54,8 @@ USAGE
   dreamlayer capabilities
 
 OPTIONS
-  --out <file>      Where to write the image. Default: dreamlayer-<n>.png
+  --out <file>      New output file; never overwrites. Default: dreamlayer-<n>.png
+                    Existing destinations are refused before paid submission.
   --image <file>    Attach an image when answering a question that asks for one
   --aspect <ratio>  1:1, 16:9, 9:16, 4:3, 3:4. Default 1:1
   --action <name>  Sprite preset: walk, run, idle (walk if no custom prompt)
@@ -102,6 +103,30 @@ class UsageError extends Error {}
 class CommandError extends Error {
   constructor(readonly reason: string, message: string, readonly exitCode: number, readonly retryable = false, readonly guidance?: string) { super(message); }
 }
+async function preflightOutput(target: string): Promise<void> {
+  // lstat also detects dangling symlinks. The final exclusive write remains
+  // necessary because another process can create the destination during the job.
+  let exists = false;
+  try {
+    await lstat(target);
+    exists = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new CommandError("output_unavailable", "The output destination could not be checked. No generation was submitted.", 1);
+    }
+  }
+  if (exists) {
+    throw new CommandError("output_exists", "The output destination already exists. Refusing to overwrite; no generation was submitted.", 1, false, "Use the existing output or choose a new --out path for intentionally new work.");
+  }
+  try {
+    const parent = path.dirname(path.resolve(target));
+    if (!(await stat(parent)).isDirectory()) throw new Error("not a directory");
+    await access(parent, constants.W_OK | constants.X_OK);
+  } catch {
+    throw new CommandError("output_unavailable", "The output parent must be an existing writable directory. No generation was submitted.", 1);
+  }
+}
+
 async function saveOutput(target: string, bytes: Uint8Array): Promise<void> {
   try { await writeFile(target, bytes, { flag: "wx" }); }
   catch { throw new CommandError("local_output_failed", "The output could not be saved locally. Generation has already completed.", 1, true, "Fix the destination or choose a new path, then use dreamlayer download with the saved execution_id. Do not generate again."); }
@@ -361,6 +386,10 @@ async function main(argv: string[]): Promise<number> {
   }
 
   const { positional, options } = parseOptions(rest);
+  if (["generate", "edit", "cutout", "upscale", "sprite", "answer"].includes(command)) {
+    options.out ??= command === "sprite" ? `dreamlayer-${Date.now()}.zip` : defaultOut();
+    await preflightOutput(options.out);
+  }
 
   switch (command) {
     case "sprite": {
