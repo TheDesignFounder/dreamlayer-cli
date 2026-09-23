@@ -8,3 +8,5 @@ Prepared version: `0.4.0-beta.2`. Keep `latest` on `0.3.0` until a stable releas
 4. Update pinned documentation examples only after the version exists on npm.
 
 No paid generation is necessary to verify installation or help output.
+
+The package defaults to `publishConfig.tag: beta`; still pass `--tag beta` explicitly. Re-review the recovery fixes before publication. README links use existing pages; the beta.2-only tool/automation pages are held outside the docs site until the packages are published. Restore those pages in a later docs change with the stated minimum version.

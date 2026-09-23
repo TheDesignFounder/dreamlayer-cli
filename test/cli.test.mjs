@@ -597,7 +597,7 @@ test("a bad file is rejected locally, before anything is uploaded or charged", a
   api.close();
 
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /cannot read/);
+  assert.match(result.stderr, /local input file could not be read/);
   assert.equal(touched, 0, "an unreadable file must never reach the API");
 });
 
@@ -1017,6 +1017,85 @@ test("download recovers existing assets using GET only and refuses overwrite", a
     assert.ok(handler.calls.every(call => call.method === 'GET'));
     const duplicate = await runCli(['download', 'owned', '--out', destination, '--json'], { DREAMLAYER_API_URL: api.url });
     assert.equal(duplicate.code, 1);
+    const failure = JSON.parse(duplicate.stderr).error;
+    assert.equal(failure.reason, 'local_output_failed');
+    assert.equal(failure.execution_id, 'owned');
+    assert.equal(failure.retryable, true);
+    assert.match(failure.guidance, /dreamlayer download/);
     assert.deepEqual(await readFile(destination), PNG);
+  } finally { api.close(); }
+});
+
+for (const json of [false, true]) {
+  test(`completed generation with unwritable output preserves download recovery (json=${json})`, async () => {
+    const api = await listen(fakeApi({ events: [started,
+      { event: 'asset', data: {asset_id: '44444444-4444-4444-8444-444444444444', download_url: 'ASSET'} },
+      { event: 'done', data: { status: 'completed' } }] }));
+    const directory = await mkdtemp(path.join(tmpdir(), 'dl-output-failed-'));
+    try {
+      const result = await runCli(['generate', 'a tree', '--out', path.join(directory, 'missing', 'result.png'), '--idempotency-key', 'saved-request', ...(json ? ['--json'] : [])], {DREAMLAYER_API_URL: api.url});
+      assert.equal(result.code, 1);
+      assert.equal(result.stdout, '');
+      if (json) {
+        const error = JSON.parse(result.stderr).error;
+        assert.equal(error.reason, 'local_output_failed');
+        assert.equal(error.retryable, true);
+        assert.equal(error.execution_id, started.data.execution_id);
+        assert.equal(error.idempotency_key, 'saved-request');
+      } else {
+        assert.match(result.stderr, /dreamlayer download/);
+        assert.ok(result.stderr.includes(started.data.execution_id));
+      }
+      assert.equal(api.calls.filter(c => c.method === 'POST' && c.url === '/v1/execute').length, 1);
+    } finally { api.close(); }
+  });
+}
+
+test('missing key and unreadable input have distinct sanitized errors before network work', async () => {
+  const api = await listen(fakeApi({events: []}));
+  try {
+    const auth = await runCli(['balance', '--json'], {DREAMLAYER_API_KEY: '', DREAMLAYER_API_URL: api.url});
+    assert.equal(auth.code, 2);
+    assert.equal(JSON.parse(auth.stderr).error.reason, 'authentication_failed');
+    const file = await runCli(['edit', '/private/customer-secret-photo.png', 'a real prompt', '--json'], {DREAMLAYER_API_URL: api.url});
+    assert.equal(file.code, 1);
+    assert.equal(JSON.parse(file.stderr).error.reason, 'local_input_failed');
+    assert.doesNotMatch(file.stderr, /customer-secret-photo/);
+    assert.equal(api.calls.length, 0);
+  } finally { api.close(); }
+});
+
+for (const state of [{status: 'running'}, {status: 'completed', image_job: {finished_assets: [{download_url: 'one'}, {download_url: 'two'}]}}]) {
+  test(`download refuses ${state.status} without one output, and does not generate`, async () => {
+    const api = await listen(fakeApi({events: [], execution: state}));
+    try {
+      const result = await runCli(['download', 'owned', '--out', 'unused.png', '--json'], {DREAMLAYER_API_URL: api.url});
+      assert.equal(result.code, 5);
+      assert.equal(JSON.parse(result.stderr).error.reason, 'output_not_ready');
+      assert.deepEqual(api.calls.map(c => c.method), ['GET']);
+    } finally { api.close(); }
+  });
+}
+
+test('cancelled execution is a nonretryable stderr result', async () => {
+  const api = await listen(fakeApi({events: [started, {event: 'done', data: {status: 'cancelled'}}]}));
+  try {
+    const result = await runCli(['generate', 'a tree', '--json'], {DREAMLAYER_API_URL: api.url});
+    assert.equal(result.code, 4);
+    assert.equal(result.stdout, '');
+    assert.equal(JSON.parse(result.stderr).error.reason, 'execution_cancelled');
+    assert.equal(JSON.parse(result.stderr).error.retryable, false);
+  } finally { api.close(); }
+});
+
+test('stream without an identifier is uncertain rather than a failed generation', async () => {
+  const api = await listen(fakeApi({events: []}));
+  try {
+    const result = await runCli(['generate', 'a tree', '--idempotency-key', 'saved-request', '--json'], {DREAMLAYER_API_URL: api.url});
+    assert.equal(result.code, 5);
+    const error = JSON.parse(result.stderr).error;
+    assert.equal(error.reason, 'temporarily_unavailable');
+    assert.equal(error.idempotency_key, 'saved-request');
+    assert.equal(api.calls.filter(c => c.method === 'POST').length, 1);
   } finally { api.close(); }
 });

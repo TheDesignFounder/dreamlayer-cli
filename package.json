@@ -39,5 +39,8 @@
     "type": "git",
     "url": "git+https://github.com/TheDesignFounder/dreamlayer-cli.git"
   },
-  "homepage": "https://docs.dreamlayer.io/cli"
+  "homepage": "https://docs.dreamlayer.io/cli",
+  "publishConfig": {
+    "tag": "beta"
+  }
 }

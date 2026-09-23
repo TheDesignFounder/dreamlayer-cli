@@ -143,9 +143,18 @@ dreamlayer download EXECUTION_ID --out recovered.png --json
 in JSON include the available execution ID and idempotency key for recovery. Treat them
 as private identifiers. For file-based commands, rerunning uploads a new asset: the same
 local file is not an identical API request. Prefer `status` and `download`, or the
-[journaled API examples](https://docs.dreamlayer.io/agent-api/examples).
+[execution recovery guide](https://docs.dreamlayer.io/agent-api/jobs-and-events).
 
 [API overview](https://docs.dreamlayer.io/agent-api) ·
-[Limits](https://docs.dreamlayer.io/agent-api/limits) ·
-[Automation](https://docs.dreamlayer.io/cli/automation) ·
-[MCP tools](https://docs.dreamlayer.io/mcp/tools)
+[CLI guide](https://docs.dreamlayer.io/cli) ·
+[MCP setup](https://docs.dreamlayer.io/mcp)
+
+Local client failures are separate from API generation failures. `local_output_failed`
+(exit 1) means the completed output could not be written; fix the destination and run
+`download` with the saved execution ID. `download_failed` or `output_not_ready` (exit 5)
+also require recovery of existing work, not a new generation. `retryable: true` means
+retry the indicated recovery action, never blindly repeat a paid command.
+`local_input_failed` (exit 1) means no readable input was supplied; missing credentials
+use `authentication_failed` (exit 2). A cancelled run uses `execution_cancelled`, exit 4,
+and a JSON error on stderr. Unknown client failures use `client_error`; they do not
+prove that the server-side generation failed.

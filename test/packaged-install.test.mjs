@@ -57,6 +57,7 @@ test("the packed CLI installs offline and its shipped binary starts", { timeout:
   const packageJson = JSON.parse(
     await readFile(path.join(installRoot, "node_modules", "dreamlayer", "package.json"), "utf8"),
   );
+  assert.equal(packageJson.publishConfig.tag, "beta");
   assert.equal(packageJson.version, "0.4.0-beta.2");
   assert.equal(packageJson.bin.dreamlayer, "./dist/cli.js");
 
