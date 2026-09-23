@@ -706,7 +706,16 @@ export class ManagedClient {
         if (error instanceof StreamIdleError) throw error;
         if (error instanceof InputValidationError || (error instanceof ApiError && ![429, 500, 502, 503, 504].includes(error.status))) throw error;
         if (!executionId && error instanceof ApiError) throw error;
-        if (!executionId || ++failures > 5) throw new RecoveryRequiredError("Execution state is uncertain. Read saved state before retrying.");
+        if (!executionId || ++failures > 5) {
+          const code = (error as { cause?: { code?: string }; code?: string } | null)?.cause?.code ?? (error as { code?: string } | null)?.code;
+          const causes: Record<string, string> = {
+            ECONNREFUSED: "Connection refused", ENOTFOUND: "Host lookup failed", EAI_AGAIN: "Host lookup temporarily failed",
+            ECONNRESET: "Connection reset", ETIMEDOUT: "Connection timed out", UND_ERR_CONNECT_TIMEOUT: "Connection timed out",
+            UND_ERR_SOCKET: "Connection closed", CERT_HAS_EXPIRED: "TLS certificate expired", DEPTH_ZERO_SELF_SIGNED_CERT: "TLS certificate is untrusted",
+          };
+          const cause = code && causes[code] ? `${causes[code]} (${code}). ` : "Transport connection failed. ";
+          throw new RecoveryRequiredError(cause + "Execution state is uncertain. Read saved state before retrying.");
+        }
       }
       if (!executionId) throw new RecoveryRequiredError("Execution stream ended before an identifier was received; reuse your idempotency key.");
       const state = await this.getExecution(executionId);

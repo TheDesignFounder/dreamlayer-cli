@@ -96,6 +96,7 @@ type Options = {
   aspect: string;
   json: boolean;
   quiet: boolean;
+  help: boolean;
   idempotencyKey: string | null;
 };
 
@@ -133,7 +134,7 @@ async function saveOutput(target: string, bytes: Uint8Array): Promise<void> {
 }
 async function downloadOutput(api: ManagedClient, url: string): Promise<Uint8Array> {
   try { return await api.download(url); }
-  catch { throw new CommandError("download_failed", "The completed output could not be downloaded.", 5, true, "Retry dreamlayer download with the saved execution_id. Do not generate again."); }
+  catch (error) { if (error instanceof ApiError && [401, 403].includes(error.status)) throw error; throw new CommandError("download_failed", "The completed output could not be downloaded.", 5, true, "Retry dreamlayer download with the saved execution_id. Do not generate again."); }
 }
 
 function parseOptions(argv: string[]): { positional: string[]; options: Options } {
@@ -146,11 +147,13 @@ function parseOptions(argv: string[]): { positional: string[]; options: Options 
     aspect: "1:1",
     json: false,
     quiet: false,
+    help: false,
     idempotencyKey: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
-    if (token === "--json") options.json = true;
+    if (token === "--help" || token === "-h") options.help = true;
+    else if (token === "--json") options.json = true;
     else if (token === "--quiet") options.quiet = true;
     else if (token === "--out" || token === "-o") {
       const value = argv[++i];
@@ -376,16 +379,13 @@ async function main(argv: string[]): Promise<number> {
     process.stdout.write(USAGE);
     return command ? 0 : 1;
   }
-  if (rest.includes("--help") || rest.includes("-h")) {
-    process.stdout.write(USAGE);
-    return 0;
-  }
   if (command === "--version" || command === "-v") {
     process.stdout.write(`${PACKAGE_VERSION}\n`);
     return 0;
   }
 
   const { positional, options } = parseOptions(rest);
+  if (options.help) { process.stdout.write(USAGE); return 0; }
   if (["generate", "edit", "cutout", "upscale", "sprite", "answer"].includes(command)) {
     options.out ??= command === "sprite" ? `dreamlayer-${Date.now()}.zip` : defaultOut();
     await preflightOutput(options.out);
@@ -502,15 +502,18 @@ main(process.argv.slice(2))
     const known = error instanceof CommandError ? error : error instanceof InputValidationError
       ? new CommandError("invalid_request", error.message, 1)
       : error instanceof RecoveryRequiredError
-      ? new CommandError("temporarily_unavailable", "Execution state is uncertain. Read saved state before retrying.", 5, true, "Use status and download for the saved execution. If no ID was received, replay identical inputs with the original idempotency key.") : null;
+      ? new CommandError("temporarily_unavailable", error.message, 5, true, "Use status and download for the saved execution. If no ID was received, replay identical inputs with the original idempotency key.") : null;
     if (known) {
       const partial = (error as { partialOutcome?: { execution_id?: string | null } }).partialOutcome;
       const identity = { ...recovery, ...(partial?.execution_id ? { execution_id: partial.execution_id } : {}) };
       const envelope = { error: { code: "CLIENT_ERROR", reason: known.reason, message: known.message, retryable: known.retryable, request_id: null, guidance: known.guidance, ...identity } };
       if (process.argv.slice(2).includes("--json")) process.stderr.write(`${JSON.stringify(envelope)}\n`);
       else {
-        process.stderr.write(`${known.message}\n${known.guidance ?? ""}\n`);
-        if (identity.execution_id) process.stderr.write(`Execution: ${identity.execution_id}\n  dreamlayer status ${identity.execution_id}\n  dreamlayer download ${identity.execution_id} --out <new-file>\n`);
+        process.stderr.write(`${known.message}\n${known.guidance ? known.guidance + "\n" : ""}`);
+        if (identity.execution_id) {
+          process.stderr.write(`Execution: ${identity.execution_id}\n  dreamlayer status ${identity.execution_id}\n`);
+          if (["local_output_failed", "download_failed"].includes(known.reason)) process.stderr.write(`  dreamlayer download ${identity.execution_id} --out <new-file>\n`);
+        }
         if (identity.idempotency_key) process.stderr.write(`Idempotency key: ${identity.idempotency_key}\n`);
       }
       process.exitCode = known.exitCode;
@@ -541,13 +544,9 @@ main(process.argv.slice(2))
           : error.retryable
             ? "Temporary. Retry with --idempotency-key to avoid paying twice."
             : "";
-      if (process.argv.slice(2).includes("--json")) {
-        process.stderr.write(`${JSON.stringify(error.toPublicEnvelope())}\n`);
-      } else {
-        process.stderr.write(
-          `${error.message}\nReason: ${error.reason}${hint ? `\n${hint}` : ""}\n`,
-        );
-      }
+      process.stderr.write(
+        `${error.message}\nReason: ${error.reason}${hint ? `\n${hint}` : ""}\n`,
+      );
       process.exitCode = exitCodeFor(error);
       return;
     }
