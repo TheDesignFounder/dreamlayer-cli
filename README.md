@@ -167,3 +167,7 @@ retry the indicated recovery action, never blindly repeat a paid command.
 use `authentication_failed` (exit 2). A cancelled run uses `execution_cancelled`, exit 4,
 and a JSON error on stderr. Unknown client failures use `client_error`; they do not
 prove that the server-side generation failed.
+
+## Error handling updates in beta.3
+
+Transport failures include a safe connection category without exposing URLs or credentials. Cancelled executions recommend a status check; download authentication failures retain exit code 2. Help flags are parsed as options so a literal `-h` option value is preserved.

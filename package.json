@@ -1,6 +1,6 @@
 {
   "name": "dreamlayer",
-  "version": "0.4.0-beta.2",
+  "version": "0.4.0-beta.3",
   "description": "Generate and edit images from your terminal, over local files, with one API key.",
   "license": "MIT",
   "type": "module",

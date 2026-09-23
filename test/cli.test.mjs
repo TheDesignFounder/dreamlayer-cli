@@ -116,6 +116,11 @@ function fakeApi(behaviour) {
       return;
     }
     if (request.url === "/asset.png") {
+      if (behaviour.assetStatus) {
+        response.writeHead(behaviour.assetStatus, { "content-type": "application/json" });
+        response.end(JSON.stringify({ detail: "private upstream details" }));
+        return;
+      }
       response.writeHead(200, { "content-type": "image/png" });
       response.end(PNG);
       return;
@@ -1160,4 +1165,52 @@ test('repeating a successful command with the same output does not submit a seco
     const help = await runCli(['--help'], {});
     assert.match(help.stdout, /Existing destinations are refused before paid submission/);
   } finally { api.close(); }
+});
+
+for (const json of [false, true]) {
+  test(`transport diagnostics retain a safe cause and request key (json=${json})`, async () => {
+    const probe = createServer();
+    await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
+    const url = `http://127.0.0.1:${probe.address().port}`;
+    await new Promise(resolve => probe.close(resolve));
+    const result = await runCli(['generate', 'PRIVATE PROMPT', '--idempotency-key', 'saved', '--quiet', ...(json ? ['--json'] : [])], {DREAMLAYER_API_URL: url});
+    assert.equal(result.code, 5);
+    assert.match(result.stderr, /Connection refused.*ECONNREFUSED/);
+    assert.match(result.stderr, /saved/);
+    assert.doesNotMatch(result.stderr, /PRIVATE PROMPT|127\.0\.0\.1|dlr_live_test/);
+  });
+  for (const status of [401, 403]) {
+    test(`asset HTTP ${status} remains an access error (json=${json})`, async () => {
+      const api = await listen(fakeApi({assetStatus: status, events: [started, {event:'asset',data:{asset_id:'44444444-4444-4444-8444-444444444444',download_url:'ASSET'}}, {event:'done',data:{status:'completed'}}]}));
+      try {
+        const result = await runCli(['generate','a tree','--quiet', ...(json ? ['--json'] : [])], {DREAMLAYER_API_URL:api.url});
+        assert.equal(result.code, 2, result.stderr);
+        assert.match(result.stderr, status === 401 ? /authentication_failed/ : /access_denied/);
+        assert.doesNotMatch(result.stderr, /download_failed|private upstream details/);
+        assert.equal(api.calls.filter(c=>c.method==='POST').length, 1);
+        if(json) assert.equal(JSON.parse(result.stderr).error.execution_id, started.data.execution_id);
+      } finally {api.close();}
+    });
+  }
+}
+test('cancelled text output recommends status without download or blank guidance', async () => {
+  const api = await listen(fakeApi({events:[started,{event:'done',data:{status:'cancelled'}}]}));
+  try {
+    const result=await runCli(['generate','a tree','--quiet'],{DREAMLAYER_API_URL:api.url});
+    assert.equal(result.code,4); assert.match(result.stderr,/dreamlayer status/);
+    assert.doesNotMatch(result.stderr,/dreamlayer download|\n\n/);
+  } finally {api.close();}
+});
+test('help-like option values do not short-circuit a command', async () => {
+  const api=await listen(fakeApi({events:[started,{event:'done',data:{status:'cancelled'}}]}));
+  try {
+    const result=await runCli(['generate','a tree','--idempotency-key','-h','--quiet'],{DREAMLAYER_API_URL:api.url});
+    assert.equal(result.code,4); assert.equal(api.calls.find(c=>c.method==='POST').headers['idempotency-key'],'-h');
+    assert.doesNotMatch(result.stdout,/USAGE/);
+  } finally {api.close();}
+});
+
+test('help after positional arguments requires no key or network', async () => {
+  const result = await runCli(['generate', 'a tree', '--help'], {DREAMLAYER_API_KEY:'', DREAMLAYER_API_URL:'http://127.0.0.1:1'});
+  assert.equal(result.code,0); assert.match(result.stdout,/USAGE/);
 });
