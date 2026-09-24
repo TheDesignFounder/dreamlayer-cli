@@ -3,14 +3,21 @@
 Generate and edit images from your terminal, over local files, with one API key.
 
 ```bash
-npm install -g dreamlayer
+npm install -g dreamlayer@0.4.0-beta.3
 export DREAMLAYER_API_KEY="dlr_live_your_key"
 
 dreamlayer generate "A glass greenhouse at dusk" --out greenhouse.png
 ```
 
 Get a key at [platform.dreamlayer.io](https://platform.dreamlayer.io). A new account
-starts at zero credits, and each finished image costs one.
+starts at zero credits. Ordinary image operations cost one credit each; sprite
+bundles use frame-count pricing. This guide pins the sprite-capable beta;
+`latest` remains `0.3.0`.
+
+Use the CLI for raster logo concepts, product imagery, marketing visuals, print
+artwork concepts and game assets. Inspect each output for its intended use.
+[Installable agent workflows and engine examples](https://github.com/TheDesignFounder/dreamlayer-agent-plugin)
+share the same capabilities, budget checks and recovery guidance.
 
 ## Commands
 
