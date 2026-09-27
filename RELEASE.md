@@ -1,6 +1,11 @@
 # Agent readiness release
 
-Prepared version: `0.4.0-beta.3`. Keep `latest` on `0.3.0` until a stable release is deliberately selected.
+Prepared version: `0.4.0-beta.4`. Keep `latest` on `0.3.0` until a stable release is deliberately selected.
+
+beta.4 adds `--background keep`: sprite frames that keep their generated background, priced at the flat
+`sprite_pricing.plain_frame_cents` with no tier (5 credits for twelve frames instead of 9.9). It refuses the flag
+against a server whose capabilities do not advertise that rate, and normalises a spelled-out `--background remove`
+off the wire so it stays the same job as an omitted one.
 
 1. Pass CI, review and merge the change.
 2. With npm publisher authentication, run `pnpm test` and `npm publish --tag beta`.

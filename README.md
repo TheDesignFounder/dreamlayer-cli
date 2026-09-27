@@ -3,7 +3,7 @@
 Generate and edit images from your terminal, over local files, with one API key.
 
 ```bash
-npm install -g dreamlayer@0.4.0-beta.3
+npm install -g dreamlayer@0.4.0-beta.4
 export DREAMLAYER_API_KEY="dlr_live_your_key"
 
 dreamlayer generate "A glass greenhouse at dusk" --out greenhouse.png
