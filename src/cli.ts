@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spriteCreditPrice } from "./client.js";
+import { spriteCreditPrice, type SpriteBackground } from "./client.js";
 /**
  * DreamLayer CLI.
  *
@@ -46,7 +46,7 @@ USAGE
   dreamlayer edit <image> <prompt> [--out <file>]
   dreamlayer cutout <image> [--out <file>]
   dreamlayer upscale <image> [--out <file>]
-  dreamlayer sprite <image> --action <walk|run|idle> [--frames <7–100>] --max-credits <n> [--out <zip>]
+  dreamlayer sprite <image> --action <walk|run|idle> [--frames <7–100>] [--background <remove|keep>] --max-credits <n> [--out <zip>]
   dreamlayer answer <conversation-id> <text> [--image <file>] [--out <file>]
   dreamlayer download <execution-id> --out <file>
   dreamlayer status <execution-id>
@@ -63,6 +63,8 @@ OPTIONS
   --animation-mode <loop|once>  Default: loop for presets, once for custom
   --frame-size <px> Square export: 32, 64, 128, 256, 512 (default), 720, 1080
   --frames <n>      Frame count: integer 7–100, default 12
+  --background <remove|keep>  remove cuts every frame out (default). keep leaves
+                    the background in place: plain frames, about half the price
   --max-credits <n> Maximum approved charge for the sprite job
   --json            JSON results on stdout; JSON errors on stderr
   --quiet           No progress on stderr
@@ -91,6 +93,7 @@ type Options = {
   frameSize?: 32 | 64 | 128 | 256 | 512 | 720 | 1080;
   maxCredits: number;
   frameCount: number;
+  background?: SpriteBackground;
   out: string | null;
   image: string | null;
   aspect: string;
@@ -175,6 +178,10 @@ function parseOptions(argv: string[]): { positional: string[]; options: Options 
       const value = Number(argv[++i]);
       if (![32, 64, 128, 256, 512, 720, 1080].includes(value)) throw new UsageError("--frame-size must be 32, 64, 128, 256, 512, 720 or 1080");
       options.frameSize = value as Options["frameSize"];
+    } else if (token === "--background") {
+      const value = argv[++i];
+      if (value !== "remove" && value !== "keep") throw new UsageError("--background must be remove or keep");
+      options.background = value;
     } else if (token === "--frames") {
       const value = Number(argv[++i]);
       if (!Number.isInteger(value) || value < 7 || value > 100) throw new UsageError("--frames must be an integer from 7 to 100");
@@ -400,9 +407,11 @@ async function main(argv: string[]): Promise<number> {
       const caps = await api.getCapabilities();
       if (!Array.isArray(caps.operations) || !caps.operations.includes("sprite_sheet")) throw new UsageError("sprite beta access is not enabled for this account");
       if (!caps.sprite_pricing) throw new UsageError("The server does not support configurable sprite pricing yet");
-      const price = spriteCreditPrice(options.frameCount);
+      const background = options.background ?? "remove";
+      if (background === "keep" && typeof caps.sprite_pricing === "object" && caps.sprite_pricing !== null && !("plain_frame_cents" in caps.sprite_pricing)) throw new UsageError("This server does not offer sprite sheets that keep their background yet");
+      const price = spriteCreditPrice(options.frameCount, background);
       if (options.maxCredits < price) throw new UsageError(`Sprite jobs require ${price} credits. Set --max-credits to approve that amount.`);
-      return run(api, { operation: "sprite_sheet", input_asset_id: await upload(api, file), options: { ...(options.animationPrompt ? { animation_prompt: options.animationPrompt } : { action: options.action ?? "walk" }), ...(options.animationMode ? { animation_mode: options.animationMode } : {}), ...(options.frameSize ? { frame_size: options.frameSize } : {}), frame_count: options.frameCount }, max_credits: options.maxCredits }, options);
+      return run(api, { operation: "sprite_sheet", input_asset_id: await upload(api, file), options: { ...(options.animationPrompt ? { animation_prompt: options.animationPrompt } : { action: options.action ?? "walk" }), ...(options.animationMode ? { animation_mode: options.animationMode } : {}), ...(options.frameSize ? { frame_size: options.frameSize } : {}), ...(background === "keep" ? { background } : {}), frame_count: options.frameCount }, max_credits: options.maxCredits }, options);
     }
     case "generate": {
       const prompt = positional[0];

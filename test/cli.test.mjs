@@ -1214,3 +1214,68 @@ test('help after positional arguments requires no key or network', async () => {
   const result = await runCli(['generate', 'a tree', '--help'], {DREAMLAYER_API_KEY:'', DREAMLAYER_API_URL:'http://127.0.0.1:1'});
   assert.equal(result.code,0); assert.match(result.stdout,/USAGE/);
 });
+
+// --- sprite sheets that keep their background --------------------------------
+// The server advertises the flat rate as sprite_pricing.plain_frame_cents. A CLI
+// that quoted the transparent tier for a plain sheet would ask for roughly twice
+// the credits the job actually needs.
+const PLAIN_CAPS = {api_version:'1',operations:['sprite_sheet'],sprite_pricing:{minimum_frames:7,maximum_frames:100,plain_frame_cents:7}};
+const plainApi = () => fakeApi({capabilities:PLAIN_CAPS,events:[started,{event:'asset',data:{asset_id:'44444444-4444-4444-8444-444444444444',download_url:'ASSET'}},{event:'done',data:{status:'completed'}}]});
+
+test('sprite CLI sends a kept background at the flat rate a transparent sheet would refuse', async()=>{
+ const api=await listen(plainApi());
+ const dir=await mkdtemp(path.join(tmpdir(),'sprite-keep-'));
+ const input=path.join(dir,'reference.png');await writeFile(input,PNG);
+ try {
+  const refused=await runCli(['sprite',input,'--frames','12','--max-credits','5','--out',path.join(dir,'transparent.zip'),'--quiet'],{DREAMLAYER_API_URL:api.url});
+  assert.notEqual(refused.code,0);assert.match(refused.stderr,/9\.9 credits/);
+  assert.equal(api.calls.filter(c=>c.url==='/v1/execute').length,0,'a refused quote must not submit');
+  const result=await runCli(['sprite',input,'--frames','12','--background','keep','--max-credits','5','--out',path.join(dir,'plain.zip'),'--quiet'],{DREAMLAYER_API_URL:api.url});
+  assert.equal(result.code,0,result.stderr);
+  const body=api.calls.find(c=>c.url==='/v1/execute').body;
+  assert.equal(body.options.background,'keep');assert.equal(body.options.frame_count,12);assert.equal(body.max_credits,5);
+ } finally {api.close();}
+});
+
+test('sprite CLI refuses 4.9 credits for twelve plain frames', async()=>{
+ const api=await listen(plainApi());
+ const dir=await mkdtemp(path.join(tmpdir(),'sprite-keep-cap-'));
+ const input=path.join(dir,'reference.png');await writeFile(input,PNG);
+ try {
+  const result=await runCli(['sprite',input,'--frames','12','--background','keep','--max-credits','4.9','--out',path.join(dir,'plain.zip'),'--quiet'],{DREAMLAYER_API_URL:api.url});
+  assert.notEqual(result.code,0);assert.match(result.stderr,/require 5 credits/);
+  assert.equal(api.calls.filter(c=>c.url==='/v1/execute').length,0);
+ } finally {api.close();}
+});
+
+test('a spelled-out remove is the same job on the wire as an omitted one', async()=>{
+ const api=await listen(plainApi());
+ const dir=await mkdtemp(path.join(tmpdir(),'sprite-remove-'));
+ const input=path.join(dir,'reference.png');await writeFile(input,PNG);
+ try {
+  const result=await runCli(['sprite',input,'--frames','12','--background','remove','--max-credits','9.9','--out',path.join(dir,'sheet.zip'),'--quiet'],{DREAMLAYER_API_URL:api.url});
+  assert.equal(result.code,0,result.stderr);
+  const body=api.calls.find(c=>c.url==='/v1/execute').body;
+  assert.ok(!('background' in body.options),`background must not reach the wire: ${JSON.stringify(body.options)}`);
+ } finally {api.close();}
+});
+
+test('a server without the flat rate refuses a kept background before uploading', async()=>{
+ const api=await listen(fakeApi({capabilities:{api_version:'1',operations:['sprite_sheet'],sprite_pricing:{minimum_frames:7,maximum_frames:100}},events:[]}));
+ const dir=await mkdtemp(path.join(tmpdir(),'sprite-old-'));
+ const input=path.join(dir,'reference.png');await writeFile(input,PNG);
+ try {
+  const result=await runCli(['sprite',input,'--frames','12','--background','keep','--max-credits','5','--out',path.join(dir,'plain.zip'),'--quiet'],{DREAMLAYER_API_URL:api.url});
+  assert.notEqual(result.code,0);assert.match(result.stderr,/keep their background/);
+  assert.equal(api.calls.filter(c=>c.url==='/v1/execute').length,0);
+  assert.equal(api.calls.filter(c=>c.url.startsWith('/v1/input-assets')).length,0,'nothing may be uploaded');
+ } finally {api.close();}
+});
+
+test('an unknown background is rejected before any network call', async()=>{
+ const api=await listen(fakeApi({events:[]}));
+ try {
+  const result=await runCli(['sprite','missing.png','--background','transparent','--max-credits','100'],{DREAMLAYER_API_URL:api.url});
+  assert.notEqual(result.code,0);assert.match(result.stderr,/--background must be remove or keep/);assert.equal(api.calls.length,0);
+ } finally {api.close();}
+});
