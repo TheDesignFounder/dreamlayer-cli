@@ -277,7 +277,8 @@ async function run(
   }
 
   if (outcome.status !== "completed" || !outcome.asset) {
-    progress.stop(options.json ? undefined : "Failed");
+    progress.stop(options.json ? undefined : ["failed", "cancelled"].includes(outcome.status)
+      ? "Failed" : "Output not confirmed; check the saved execution.");
     if (outcome.status === "failed" && outcome.execution_id) {
       const terminal = terminalExecutionError(await api.getExecution(outcome.execution_id));
       if (terminal) throw terminal;

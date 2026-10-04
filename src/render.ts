@@ -96,6 +96,14 @@ export async function consume(
       if (event.event === "started") {
         outcome.execution_id = String(event.data.execution_id);
         outcome.conversation_id = String(event.data.conversation_id);
+        outcome.status = "queued";
+      } else if (event.event === "job") {
+        // A dropped/idle stream is not an unknown or failed execution. Keep
+        // the most recent server-reported state alongside its recovery ID.
+        const status = String(event.data.status);
+        if (["queued", "running", "completed", "failed", "cancelled"].includes(status)) {
+          outcome.status = status;
+        }
       } else if (event.event === "asset") {
         outcome.asset = {
           asset_id: String(event.data.asset_id),
