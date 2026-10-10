@@ -22,6 +22,7 @@ import path from "node:path";
 
 import {
   ApiError,
+  isVideoPrompt,
   InputValidationError,
   RecoveryRequiredError,
   KNOWN_OPERATIONS,
@@ -43,6 +44,10 @@ const USAGE = `dreamlayer - generate and edit images from your terminal
 
 USAGE
   dreamlayer generate <prompt> [--aspect <ratio>] [--out <file>]
+  dreamlayer video quote --prompt <text> [--image <file-or-asset-id>] [--model auto|flux-3|seedance-2.5] [--duration <seconds>]
+  dreamlayer video execute --quote <quote-id> --max-credits <ceiling> --idempotency-key <saved-key>
+  dreamlayer video status|wait <execution-id> [--wait-timeout <seconds>]
+  dreamlayer video download <execution-id> --output <new-file.mp4>
   dreamlayer edit <image> <prompt> [--out <file>]
   dreamlayer cutout <image> [--out <file>]
   dreamlayer upscale <image> [--out <file>]
@@ -72,7 +77,7 @@ OPTIONS
 
 EXIT CODES
   0 success, 1 usage/local error, 2 authentication/access, 3 credits/quota,
-  4 permanent API failure, 5 temporary failure, 6 input required
+  4 permanent API failure, 5 temporary failure, 6 input required, 7 video still running
 
 AUTOMATION
   Commands never prompt. Save a unique --idempotency-key before paid work.
@@ -383,6 +388,7 @@ function exitCodeFor(error: ApiError): number {
 
 async function main(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
+  if (command === "video") return (await import("./video.js")).videoMain(rest);
   if (!command || command === "--help" || command === "-h" || command === "help") {
     process.stdout.write(USAGE);
     return command ? 0 : 1;
@@ -417,6 +423,10 @@ async function main(argv: string[]): Promise<number> {
     case "generate": {
       const prompt = positional[0];
       if (!prompt) throw new UsageError("generate needs a prompt");
+      if (isVideoPrompt(prompt)) {
+        process.stdout.write(JSON.stringify(await client().planVideoPrompt(prompt, undefined, rest.includes("--aspect") ? options.aspect : undefined)) + "\n");
+        return 0;
+      }
       return run(
         client(),
         { prompt, operation: "text_to_image", aspect_ratio: options.aspect },
@@ -426,6 +436,11 @@ async function main(argv: string[]): Promise<number> {
     case "edit": {
       const [file, prompt] = positional;
       if (!file || !prompt) throw new UsageError("edit needs an image and a prompt");
+      if (isVideoPrompt(prompt)) {
+        const api = client();
+        process.stdout.write(JSON.stringify(await api.planVideoPrompt(prompt, await upload(api, file), rest.includes("--aspect") ? options.aspect : undefined)) + "\n");
+        return 0;
+      }
       return imageCommand("image_to_image", prompt, file, options);
     }
     case "cutout": {

@@ -2,6 +2,63 @@
 
 Generate and edit images from your terminal, over local files, with one API key.
 
+This working tree also contains the **unpublished 0.5.0-beta.0 video candidate**.
+The published-image installation below does not enable video. To review the
+candidate, use Node >=22.12, `pnpm install --frozen-lockfile`, `pnpm build`, then
+`node dist/cli.js video ...` against a video-enabled test endpoint. No registry
+publication or production activation is implied.
+
+## Video candidate
+
+Both text-to-video and one-image-to-video use quote-first admission. Quotes cost
+no generation credits and return the selected model, resolved settings and fixed
+API-credit price. `pricing_pending` is not executable. Execution requires an
+explicit spending ceiling and a key saved before the request; no interactive
+confirmation is required for automation.
+
+```bash
+# Replace dreamlayer below with node dist/cli.js when reviewing the local candidate.
+dreamlayer video quote --prompt "A 15-second silent video of a forest" --operation txt2vid
+dreamlayer video quote --prompt "Show this product on a clean white background" \
+  --image ./product.png --operation img2vid --duration 15 --audio off
+dreamlayer video quote --prompt "A slow camera pan through a furnished room" \
+  --image ./room.png --model flux-3 --duration 20
+dreamlayer video execute --quote QUOTE_ID --max-credits 40 --idempotency-key SAVED_UNIQUE_KEY
+dreamlayer video status EXECUTION_ID
+dreamlayer video wait EXECUTION_ID --wait-timeout 120
+dreamlayer video download EXECUTION_ID --output ./result.mp4
+```
+
+`--image` accepts an owned uploaded asset UUID or a regular local image file
+(up to 200 MB before existing server normalization; normalized video inputs must
+fit the backend's 4096px-per-side / 20 MB limits). Multiple references are not in
+V1. No supplied image is dropped. Default duration is 15s, resolution is the native
+720p profile, and audio is off unless requested. Text aspect defaults to 16:9;
+`--aspect 16:9|9:16|1:1` is text-only. Image video preserves the source-driven
+native aspect and rejects fixed-aspect requests. Use `--context product` and
+`--background white|non_white|unknown` for explicit product/background context.
+
+Automatic image routing uses Seedance for requested white backgrounds and unknown
+product backgrounds, FLUX for known non-white/lifestyle scenes. Above 20s it uses
+Seedance; above 30s it rejects. Explicit FLUX is limited to 5–20s and is never
+silently overridden. Seedance supports 4–30s. Source pixels are not classified.
+Text routing is separate and provisionally uses FLUX up to 20s (Seedance at 4s or
+21–30s), not a claim about text/audio quality.
+
+Ordinary `generate "Make a 15-second video ..."` and `edit image.png "Make a video ..."`
+return a quote rather than submitting paid video. Explicit image operations retain
+their old behavior. Simple numeric prompt settings are validated; prefer structured
+video flags for unambiguous settings.
+
+Wait expiry exits **7** and leaves the job running. Retain its execution ID and
+resume status/wait/download. After a lost submission response, repeat the same
+quote, ceiling and idempotency key—even if the quote has since expired. Do not
+create a replacement job. A failed download retries delivery, not generation.
+Downloads stream with size/hash checks and never overwrite an existing path.
+Outputs remain available for 30 days; fresh download requests renew signed links.
+There is no automatic second model/provider attempt. API credits are separate
+from Studio credits; a later delivery after a restored hold is not charged again.
+
 ```bash
 npm install -g dreamlayer@0.4.0-beta.4
 export DREAMLAYER_API_KEY="dlr_live_your_key"

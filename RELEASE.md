@@ -1,5 +1,19 @@
 # Agent readiness release
 
+## Video candidate — not published
+
+`0.5.0-beta.0` adds `video quote/execute/status/wait/download` and ordinary
+video-prompt routing into the quote flow. Quotes do not spend; execution requires
+an explicit ceiling and persisted idempotency key. A client wait timeout does not
+cancel or replace the job.
+
+Do not publish until the compatible backend is live and the exact tested tarball
+has release approval. The backend `VIDEO_V1_RELEASE.md` lists paid qualification,
+protected migration, cloud verification and rollback gates. README install pins
+remain on the previously published version; this candidate is a local build only.
+
+## Previous image/sprite release record
+
 Prepared version: `0.4.0-beta.4`. Keep `latest` on `0.3.0` until a stable release is deliberately selected.
 
 beta.4 adds `--background keep`: sprite frames that keep their generated background, priced at the flat
