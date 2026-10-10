@@ -45,6 +45,7 @@ const USAGE = `dreamlayer - generate and edit images from your terminal
 USAGE
   dreamlayer generate <prompt> [--aspect <ratio>] [--out <file>]
   dreamlayer video quote --prompt <text> [--image <file-or-asset-id>] [--model auto|flux-3|seedance-2.5] [--duration <seconds>]
+    Duration defaults to 10 seconds only when unspecified in both prompt and flags; issued quotes are unchanged.
   dreamlayer video execute --quote <quote-id> --max-credits <ceiling> --idempotency-key <saved-key>
   dreamlayer video status|wait <execution-id> [--wait-timeout <seconds>]
   dreamlayer video download <execution-id> --output <new-file.mp4>

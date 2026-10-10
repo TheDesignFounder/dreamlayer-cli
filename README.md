@@ -18,7 +18,7 @@ confirmation is required for automation.
 
 ```bash
 # Replace dreamlayer below with node dist/cli.js when reviewing the local candidate.
-dreamlayer video quote --prompt "A 15-second silent video of a forest" --operation txt2vid
+dreamlayer video quote --prompt "A silent video of a forest" --operation txt2vid
 dreamlayer video quote --prompt "Show this product on a clean white background" \
   --image ./product.png --operation img2vid --duration 15 --audio off
 dreamlayer video quote --prompt "A slow camera pan through a furnished room" \
@@ -32,18 +32,23 @@ dreamlayer video download EXECUTION_ID --output ./result.mp4
 `--image` accepts an owned uploaded asset UUID or a regular local image file
 (up to 200 MB before existing server normalization; normalized video inputs must
 fit the backend's 4096px-per-side / 20 MB limits). Multiple references are not in
-V1. No supplied image is dropped. Default duration is 15s, resolution is the native
+V1. No supplied image is dropped. Default duration is 10s when omitted from both prompt and flags; explicit durations and issued quotes are unchanged. Resolution is the native
 720p profile, and audio is off unless requested. Text aspect defaults to 16:9;
 `--aspect 16:9|9:16|1:1` is text-only. Image video preserves the source-driven
 native aspect and rejects fixed-aspect requests. Use `--context product` and
 `--background white|non_white|unknown` for explicit product/background context.
 
-Automatic image routing uses Seedance for requested white backgrounds and unknown
-product backgrounds, FLUX for known non-white/lifestyle scenes. Above 20s it uses
-Seedance; above 30s it rejects. Explicit FLUX is limited to 5–20s and is never
-silently overridden. Seedance supports 4–30s. Source pixels are not classified.
-Text routing is separate and provisionally uses FLUX up to 20s (Seedance at 4s or
-21–30s), not a claim about text/audio quality.
+Policy `video-v2-creative-10s-20261010` applies only to new quotes.
+Explicit compatible model first; automatic 4s or 21–30s selects Seedance.
+Complex action, demanding audio, continuity, white/unknown product backgrounds
+and uncertain classification prefer Seedance. Clearly simple non-white product,
+one-speaker talking-head, retro or controlled cinematic-lighting scenes prefer
+FLUX. Complexity beats style; these are preferences, not quality guarantees.
+FLUX accepts 5–20s; Seedance 4–30s. Source pixels are not analyzed.
+Spoken dialogue enables unspecified audio; captions/labels do not. Shot timestamps
+are not duration/aspect settings. Overlong timelines fail before spending rather
+than being compressed; dialogue is never truncated. Live-test defaults remain 5s.
+Existing quotes retain their model, prompt, settings and price.
 
 Ordinary `generate "Make a 15-second video ..."` and `edit image.png "Make a video ..."`
 return a quote rather than submitting paid video. Explicit image operations retain
