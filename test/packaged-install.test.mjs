@@ -25,7 +25,7 @@ test("the packed CLI installs offline and its shipped binary starts", { timeout:
   assert.equal(packed.status, 0, packed.stderr);
   const metadata = JSON.parse(packed.stdout)[0];
   assert.equal(metadata.name, "dreamlayer");
-  assert.equal(metadata.version, "0.4.0-beta.4");
+  assert.equal(metadata.version, "0.5.0-beta.0");
   assert.ok(metadata.integrity.startsWith("sha512-"));
   assert.deepEqual(
     metadata.files.map(({ path: file }) => file).sort(),
@@ -39,6 +39,8 @@ test("the packed CLI installs offline and its shipped binary starts", { timeout:
       "dist/client.js",
       "dist/render.d.ts",
       "dist/render.js",
+      "dist/video.d.ts",
+      "dist/video.js",
       "package.json",
     ],
   );
@@ -58,7 +60,7 @@ test("the packed CLI installs offline and its shipped binary starts", { timeout:
     await readFile(path.join(installRoot, "node_modules", "dreamlayer", "package.json"), "utf8"),
   );
   assert.equal(packageJson.publishConfig.tag, "beta");
-  assert.equal(packageJson.version, "0.4.0-beta.4");
+  assert.equal(packageJson.version, "0.5.0-beta.0");
   assert.equal(packageJson.bin.dreamlayer, "./dist/cli.js");
 
   const env = { ...process.env, DREAMLAYER_API_KEY: "" };
