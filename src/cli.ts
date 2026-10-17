@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spriteCreditPrice, type SpriteBackground } from "./client.js";
+import { type SpriteBackground } from "./client.js";
 /**
  * DreamLayer CLI.
  *
@@ -416,8 +416,8 @@ async function main(argv: string[]): Promise<number> {
       if (!Array.isArray(caps.operations) || !caps.operations.includes("sprite_sheet")) throw new UsageError("sprite beta access is not enabled for this account");
       if (!caps.sprite_pricing) throw new UsageError("The server does not support configurable sprite pricing yet");
       const background = options.background ?? "remove";
-      if (background === "keep" && typeof caps.sprite_pricing === "object" && caps.sprite_pricing !== null && !("plain_frame_cents" in caps.sprite_pricing)) throw new UsageError("This server does not offer sprite sheets that keep their background yet");
-      const price = spriteCreditPrice(options.frameCount, background);
+      const estimate = await api.getSpritePrice(options.frameCount, background);
+      const price = Number(estimate.credits);
       if (options.maxCredits < price) throw new UsageError(`Sprite jobs require ${price} credits. Set --max-credits to approve that amount.`);
       return run(api, { operation: "sprite_sheet", input_asset_id: await upload(api, file), options: { ...(options.animationPrompt ? { animation_prompt: options.animationPrompt } : { action: options.action ?? "walk" }), ...(options.animationMode ? { animation_mode: options.animationMode } : {}), ...(options.frameSize ? { frame_size: options.frameSize } : {}), ...(background === "keep" ? { background } : {}), frame_count: options.frameCount }, max_credits: options.maxCredits }, options);
     }
