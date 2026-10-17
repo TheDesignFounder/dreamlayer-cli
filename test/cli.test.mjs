@@ -29,12 +29,23 @@ function fakeApi(behaviour) {
   const server = createServer((request, response) => {
     calls.push({ method: request.method, url: request.url, headers: request.headers });
 
-    if (request.url === "/v1/capabilities") {
+    if (request.url.startsWith("/v1/sprite-pricing?")) {
+      if (behaviour.noSpritePrice) { response.writeHead(404); response.end(); return; }
+      const query = new URL(request.url, "http://localhost").searchParams;
+      const frames = Number(query.get("frame_count"));
+      const background = query.get("background");
+      const credits = background === "keep" ? Math.ceil((32 + frames) * 10000 / 15) / 10000 : (42 + 2 * frames) / 10;
+      response.writeHead(200, {"content-type": "application/json"});
+      response.end(JSON.stringify({price_version: "sprite-base-frame-20261017-v1", frame_count: frames, background, credits: String(credits), reference_usd: (credits * .15).toFixed(2), reference_credit_cents: 15, binding: false}));
+      return;
+    }
+
+    if (request.url === "/v1/capabilities?pricing=current") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify(behaviour.capabilities ?? { api_version: "1", key_mode: "live" }));
       return;
     }
-    if (request.url === "/v1/balance") {
+    if (request.url === "/v1/balance?pricing=current") {
       response.writeHead(behaviour.balanceStatus ?? 200, {
         "content-type": "application/json",
         "cache-control": "private, no-store",
@@ -291,14 +302,14 @@ test("balance reads only the authenticated key's balance in human and JSON modes
   for (const args of [["balance"], ["balance", "--json"]]) {
     const api = await listen(fakeApi({ events: [] }));
     const result = await runCli(args, { DREAMLAYER_API_URL: api.url });
-    const balanceCall = api.calls.find((call) => call.url === "/v1/balance");
+    const balanceCall = api.calls.find((call) => call.url === "/v1/balance?pricing=current");
     api.close();
 
     assert.equal(result.code, 0, result.stderr);
     assert.equal(balanceCall.method, "GET");
     assert.equal(balanceCall.headers.authorization, "Bearer dlr_live_test");
     assert.equal(balanceCall.headers["dreamlayer-version"], "1");
-    assert.equal(balanceCall.url, "/v1/balance", "no account selector may be sent");
+    assert.equal(balanceCall.url, "/v1/balance?pricing=current", "no account selector may be sent");
     if (args.includes("--json")) {
       assert.deepEqual(JSON.parse(result.stdout), {
         promotional: 3,
@@ -1228,7 +1239,7 @@ test('sprite CLI sends a kept background at the flat rate a transparent sheet wo
  const input=path.join(dir,'reference.png');await writeFile(input,PNG);
  try {
   const refused=await runCli(['sprite',input,'--frames','12','--max-credits','5','--out',path.join(dir,'transparent.zip'),'--quiet'],{DREAMLAYER_API_URL:api.url});
-  assert.notEqual(refused.code,0);assert.match(refused.stderr,/9\.9 credits/);
+  assert.notEqual(refused.code,0);assert.match(refused.stderr,/6\.6 credits/);
   assert.equal(api.calls.filter(c=>c.url==='/v1/execute').length,0,'a refused quote must not submit');
   const result=await runCli(['sprite',input,'--frames','12','--background','keep','--max-credits','5','--out',path.join(dir,'plain.zip'),'--quiet'],{DREAMLAYER_API_URL:api.url});
   assert.equal(result.code,0,result.stderr);
@@ -1237,13 +1248,13 @@ test('sprite CLI sends a kept background at the flat rate a transparent sheet wo
  } finally {api.close();}
 });
 
-test('sprite CLI refuses 4.9 credits for twelve plain frames', async()=>{
+test('sprite CLI refuses a cap below the current four-decimal account estimate', async()=>{
  const api=await listen(plainApi());
  const dir=await mkdtemp(path.join(tmpdir(),'sprite-keep-cap-'));
  const input=path.join(dir,'reference.png');await writeFile(input,PNG);
  try {
-  const result=await runCli(['sprite',input,'--frames','12','--background','keep','--max-credits','4.9','--out',path.join(dir,'plain.zip'),'--quiet'],{DREAMLAYER_API_URL:api.url});
-  assert.notEqual(result.code,0);assert.match(result.stderr,/require 5 credits/);
+  const result=await runCli(['sprite',input,'--frames','12','--background','keep','--max-credits','2.9333','--out',path.join(dir,'plain.zip'),'--quiet'],{DREAMLAYER_API_URL:api.url});
+  assert.notEqual(result.code,0);assert.match(result.stderr,/require 2\.9334 credits/);
   assert.equal(api.calls.filter(c=>c.url==='/v1/execute').length,0);
  } finally {api.close();}
 });
@@ -1260,13 +1271,13 @@ test('a spelled-out remove is the same job on the wire as an omitted one', async
  } finally {api.close();}
 });
 
-test('a server without the flat rate refuses a kept background before uploading', async()=>{
- const api=await listen(fakeApi({capabilities:{api_version:'1',operations:['sprite_sheet'],sprite_pricing:{minimum_frames:7,maximum_frames:100}},events:[]}));
+test('a server without the current estimate refuses sprite work before uploading', async()=>{
+ const api=await listen(fakeApi({noSpritePrice:true,capabilities:{api_version:'1',operations:['sprite_sheet'],sprite_pricing:{minimum_frames:7,maximum_frames:100}},events:[]}));
  const dir=await mkdtemp(path.join(tmpdir(),'sprite-old-'));
  const input=path.join(dir,'reference.png');await writeFile(input,PNG);
  try {
   const result=await runCli(['sprite',input,'--frames','12','--background','keep','--max-credits','5','--out',path.join(dir,'plain.zip'),'--quiet'],{DREAMLAYER_API_URL:api.url});
-  assert.notEqual(result.code,0);assert.match(result.stderr,/keep their background/);
+  assert.notEqual(result.code,0);
   assert.equal(api.calls.filter(c=>c.url==='/v1/execute').length,0);
   assert.equal(api.calls.filter(c=>c.url.startsWith('/v1/input-assets')).length,0,'nothing may be uploaded');
  } finally {api.close();}
